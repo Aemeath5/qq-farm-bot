@@ -25,4 +25,5 @@ module.exports = {
     buildSlaveToMasterMap: landAnalysis.buildSlaveToMasterMap,
     getDisplayLandContext: landAnalysis.getDisplayLandContext,
     isOccupiedSlaveLand: landAnalysis.isOccupiedSlaveLand,
+    summarizeLandsPush: landAnalysis.summarizeLandsPush,
 };

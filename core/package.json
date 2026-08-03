@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node client.js",
     "dev": "tsx client.ts",
+    "pb-decode": "tsx src/cli/pb-decode.ts",
     "build": "tsc && tsc -p tsconfig.client.json",
     "build:ts": "tsc && tsc -p tsconfig.client.json",
     "typecheck": "tsc --noEmit",

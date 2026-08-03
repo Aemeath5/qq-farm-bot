@@ -6,6 +6,7 @@ const { CONFIG } = require('../../config/config');
 const { sendMsgAsync, getUserState, GatewayError } = require('../../utils/network');
 const { types } = require('../../utils/proto');
 const { toLong, toNum, log, logWarn, sleep, randomDelay } = require('../../utils/utils');
+const { applyDecodedPlantActivityScores } = require('../../config/gameConfig');
 const {
     syncKnownFriendGidsFromRecentVisitors,
     fetchQqFriendsByKnownGids,
@@ -79,7 +80,9 @@ export async function enterFriendFarm(friendGid: number): Promise<any> {
         reason: 2,  // ENTER_REASON_FRIEND
     })).finish();
     const { body: replyBody } = await sendMsgAsync('gamepb.visitpb.VisitService', 'Enter', body);
-    return types.VisitEnterReply.decode(replyBody);
+    const reply: any = types.VisitEnterReply.decode(replyBody);
+    applyDecodedPlantActivityScores(reply.lands);
+    return reply;
 }
 
 export async function leaveFriendFarm(friendGid: number): Promise<void> {
@@ -169,14 +172,38 @@ export async function helpFarming(friendGid: number, landIds: number[], stopWhen
     }
 }
 
+export async function checkCanOperate(friendGid: number, operationId: number): Promise<{ canOperate: boolean; canStealNum: number }> {
+    if (!types.CheckCanOperateRequest || !types.CheckCanOperateReply) {
+        return { canOperate: true, canStealNum: 0 };
+    }
+    try {
+        const body: Uint8Array = types.CheckCanOperateRequest.encode(types.CheckCanOperateRequest.create({
+            host_gid: toLong(friendGid),
+            operation_id: toLong(operationId),
+        })).finish();
+        const { body: replyBody } = await sendMsgAsync('gamepb.plantpb.PlantService', 'CheckCanOperate', body);
+        const reply: any = types.CheckCanOperateReply.decode(replyBody);
+        return {
+            canOperate: !!reply.can_operate,
+            canStealNum: toNum(reply.can_steal_num),
+        };
+    } catch {
+        // 预检查失败时降级为不拦截，避免因协议抖动导致完全不操作
+        return { canOperate: true, canStealNum: 0 };
+    }
+}
+
 export async function stealHarvest(friendGid: number, landIds: number[]): Promise<any> {
     const body: Uint8Array = types.HarvestRequest.encode(types.HarvestRequest.create({
         land_ids: landIds,
         host_gid: toLong(friendGid),
         is_all: true,
     })).finish();
-    const { body: replyBody } = await sendMsgAsync('gamepb.plantpb.PlantService', 'Harvest', body);
+    const { body: replyBody } = await sendMsgAsync('gamepb.plantpb.PlantService', 'Harvest', body, {
+        expectedErrorCodes: [1001040],
+    });
     const reply: any = types.HarvestReply.decode(replyBody);
+    applyDecodedPlantActivityScores(reply.land);
     schedulerRef().updateOperationLimits(reply.operation_limits);
     return reply;
 }

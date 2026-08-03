@@ -890,6 +890,34 @@ export const useActivityCenterStore = defineStore('activity-center', () => {
     return mutate('exchange', '/shop/exchange', accountId, { goodsId, count })
   }
 
+  function applyPass(pass: unknown) {
+    const normalized = normalizePass(pass, {})
+    if (!normalized)
+      return
+    const current = snapshot.value.season
+    if (!current) {
+      snapshot.value = normalizeActivitySnapshot({
+        ...snapshot.value,
+        season: { pass: normalized },
+      })
+      return
+    }
+    snapshot.value = {
+      ...snapshot.value,
+      season: {
+        ...current,
+        pass: {
+          ...(current.pass || {}),
+          ...normalized,
+          nodes: (normalized.nodes && normalized.nodes.length > 0)
+            ? normalized.nodes
+            : (current.pass?.nodes || []),
+          title: normalized.title || current.pass?.title || current.title,
+        },
+      },
+    }
+  }
+
   function lazyLoad(accountId: string) {
     return load(accountId, false)
   }
@@ -917,6 +945,7 @@ export const useActivityCenterStore = defineStore('activity-center', () => {
     pendingActions,
     lazyLoad,
     refresh,
+    applyPass,
     claimPass,
     lightConstellation,
     claimSolarTerm,

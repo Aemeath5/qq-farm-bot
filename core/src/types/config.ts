@@ -21,6 +21,7 @@ export interface AutomationConfig {
   friend: boolean;
   friend_help_exp_limit: boolean;
   friend_steal: boolean;
+  friend_steal_activity_only: boolean;
   friend_help: boolean;
   friend_bad: boolean;
   task: boolean;

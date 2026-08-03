@@ -4,9 +4,9 @@ export {};
  */
 const { parentPort, workerData } = require('node:worker_threads');
 
-const { CONFIG } = require('../config/config');
+const { CONFIG, updateRuntimeConfig } = require('../config/config');
 const { getLevelExpProgress, loadConfigs } = require('../config/gameConfig');
-const { getAutomation, getPreferredSeed, getConfigSnapshot, applyConfigSnapshot, getFertilizerBuyType, getFertilizerBuyCount } = require('../models/store');
+const { getAutomation, getPreferredSeed, getConfigSnapshot, applyConfigSnapshot, getFertilizerBuyType, getFertilizerBuyCount, getSystemConfig } = require('../models/store');
 const { checkAndClaimEmails } = require('../services/email');
 const { getEmailDailyState } = require('../services/email');
 const { checkFarm, startFarmCheckLoop, stopFarmCheckLoop, refreshFarmCheckLoop, getLandsDetail, getAvailableSeeds, runFarmOperation, runFertilizerByConfig } = require('../services/farm');
@@ -121,6 +121,7 @@ let lastStatusSentAt: number = 0;
 let onSellGain: ((deltaGold: any) => void) | null = null;
 let onFarmHarvested: (() => Promise<void>) | null = null;
 let harvestSellRunning: boolean = false;
+let onBattlePassChanged: ((pass?: any) => void) | null = null;
 let onWsError: ((payload: any) => void) | null = null;
 let onDisconnected: ((payload: any) => void) | null = null;
 let wsErrorHandledAt: number = 0;
@@ -467,7 +468,11 @@ async function startBot(config: any): Promise<void> {
 
     const { code, platform } = config;
 
-    CONFIG.platform = platform || 'qq';
+    const savedSystemConfig = getSystemConfig && getSystemConfig();
+    if (savedSystemConfig) {
+        updateRuntimeConfig(savedSystemConfig);
+    }
+    CONFIG.platform = platform || savedSystemConfig?.platform || 'qq';
     // 注意：间隔配置由 applyIntervalsToRuntime 统一处理，不要在这里覆盖
 
     await loadProto();
@@ -547,6 +552,12 @@ async function startBot(config: any): Promise<void> {
         };
         networkEvents.on('farmHarvested', onFarmHarvested);
 
+        if (onBattlePassChanged) {
+            networkEvents.off('battlePassChanged', onBattlePassChanged);
+        }
+        onBattlePassChanged = () => { syncStatus(true); };
+        networkEvents.on('battlePassChanged', onBattlePassChanged);
+
         // 登录后主动拉一次背包，初始化点券(ID:1002)数量
         try {
             const bagReply = await getBag();
@@ -568,6 +579,17 @@ async function startBot(config: any): Promise<void> {
         const accountId = process.env.FARM_ACCOUNT_ID || '';
         initStatsWithPersistence(accountId, Number(latest.gold || 0), Number(latest.exp || 0), Number(latest.coupon || 0));
         resetSessionGains();
+
+        // 登录后拉取游记进度（推送 BattlePassChangeNotify 也会更新）
+        try {
+            await require('../services/activity-center').refreshSeasonPass();
+        } catch (e: any) {
+            log('活动', `拉取游记进度异常: ${e && e.message ? e.message : e}`, {
+                module: 'season',
+                event: '游记进度',
+                result: 'error',
+            });
+        }
 
         // 登录成功后启动各模块
         await processInviteCodes();
@@ -592,6 +614,12 @@ async function startBot(config: any): Promise<void> {
         startUnifiedScheduler();
         // 每日礼包/任务改为跨日调度，不在农场轮询内执行
         startDailyRoutineTimer();
+        // 活动进度定时刷新（推送 BattlePassChangeNotify 也会更新）
+        workerScheduler.setIntervalTask('season_progress', 5 * 60 * 1000, () => {
+            require('../services/activity-center').refreshSeasonPass({ silent: true }).then((pass: any) => {
+                if (pass) syncStatus(true);
+            }).catch(() => {});
+        }, { preventOverlap: true });
 
         // 立即发送一次状态
         syncStatus();
@@ -620,6 +648,10 @@ function detachRuntimeListeners(): void {
     if (onFarmHarvested) {
         networkEvents.off('farmHarvested', onFarmHarvested);
         onFarmHarvested = null;
+    }
+    if (onBattlePassChanged) {
+        networkEvents.off('battlePassChanged', onBattlePassChanged);
+        onBattlePassChanged = null;
     }
 }
 

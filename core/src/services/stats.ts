@@ -278,6 +278,13 @@ function getStats(statusData: any, userState: any, connected: boolean, limits: a
             goldBean: currentGoldBean,
             exp: currentExp,
             platform: statusObj.platform || userObj.platform || 'qq',
+            travelPass: (() => {
+                try {
+                    return require('./activity-center').getLiveTravelPass() || null;
+                } catch {
+                    return null;
+                }
+            })(),
         },
         uptime: process.uptime(),
         operations: operationsSnapshot,

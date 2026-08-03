@@ -14,6 +14,7 @@ export interface AutomationConfig {
   fertilizer_land_types?: string[]
   fertilizer_smart_seconds?: number
   friend_steal?: boolean
+  friend_steal_activity_only?: boolean
   friend_help?: boolean
   friend_bad?: boolean
   friend_help_exp_limit?: boolean
@@ -115,7 +116,7 @@ const SAVEABLE_SETTINGS_KEYS: SaveableSettingsKey[] = [
 
 function createDefaultSettings(): SettingsState {
   return {
-    plantingStrategy: 'max_exp',
+    plantingStrategy: 'preferred',
     preferredSeedId: 0,
     bagSeedPriority: [],
     bagSeedFallbackStrategy: 'level',

@@ -11,6 +11,7 @@ const { toLong, toNum, syncServerTime, log, logWarn } = require('./utils');
 const cryptoWasm = require('./crypto-wasm');
 const { createGatewayToken } = require('./gateway-token');
 const { startAceRuntime, stopAceRuntime } = require('../services/ace');
+const { applyDecodedPlantActivityScores, markActivityScoreItemId, isActivityScoreItemId, getItemById } = require('../config/gameConfig');
 
 // 延迟加载 warehouse 模块避免循环依赖
 let warehouseModule: any = null;
@@ -274,11 +275,6 @@ function handleMessage(data: Buffer): void {
             const clientSeqVal = toNum(meta.client_seq);
 
             const pending = pendingCallbacks.get(clientSeqVal);
-            const expectedError = !!pending && pending.expectedErrorCodes.has(errorCode);
-            if (errorCode !== 0 && !expectedError) {
-                logWarn('错误', `${meta.service_name}.${meta.method_name} code=${errorCode} ${meta.error_message || ''}`);
-            }
-
             if (pending) {
                 pendingCallbacks.delete(clientSeqVal);
                 if (errorCode !== 0) {
@@ -287,6 +283,11 @@ function handleMessage(data: Buffer): void {
                     pending.callback(null, msg.body, meta);
                 }
                 return;
+            }
+
+            // 无 pending 回调时才刷网关错误（对齐 UI；竞态/业务错误由调用方处理）
+            if (errorCode !== 0) {
+                logWarn('错误', `${meta.service_name}.${meta.method_name} code=${errorCode} ${meta.error_message || ''}`);
             }
         }
     } catch (err: any) {
@@ -315,16 +316,15 @@ function handleNotify(msg: any): void {
             return;
         }
 
-        // 土地状态变化
+        // 土地状态变化（自己/好友农场都转发，带 hostGid；自家巡田由订阅方过滤）
         if (type.includes('LandsNotify')) {
             try {
                 const notify = types.LandsNotify.decode(eventBody);
                 const hostGid = toNum(notify.host_gid);
                 const lands = notify.lands || [];
                 if (lands.length > 0) {
-                    if (hostGid === userState.gid || hostGid === 0) {
-                        networkEvents.emit('landsChanged', lands);
-                    }
+                    applyDecodedPlantActivityScores(lands);
+                    networkEvents.emit('landsChanged', { hostGid, lands });
                 }
             } catch {}
             return;
@@ -335,12 +335,27 @@ function handleNotify(msg: any): void {
             try {
                 const notify = types.ItemNotify.decode(eventBody);
                 const items = notify.items || [];
+                const rewardParts: string[] = [];
                 for (const itemChg of items) {
                     const item = itemChg.item;
                     if (!item) continue;
                     const id = toNum(item.id);
                     const count = toNum(item.count);
                     const delta = toNum(itemChg.delta);
+
+                    if (isActivityScoreItemId(id) || id === 1019 || id === 1022) {
+                        markActivityScoreItemId(id);
+                    }
+
+                    // 活动积分等奖励打日志；金币/经验等高频不刷屏
+                    const isScore = isActivityScoreItemId(id) || id === 1019 || id === 1022;
+                    const skipNoise = id === 1101 || id === 1 || id === 1001 || id === 1002 || id === 1005;
+                    if ((isScore || (delta !== 0 && !skipNoise)) && (delta !== 0 || count > 0)) {
+                        const meta = getItemById(id);
+                        const name = (meta && meta.name) || `物品${id}`;
+                        const deltaStr = delta !== 0 ? (delta > 0 ? `+${delta}` : `${delta}`) : `=${count}`;
+                        rewardParts.push(`${name}${deltaStr}`);
+                    }
 
                     if (id === 1101) {
                         if (count > 0) userState.exp = count;
@@ -366,6 +381,14 @@ function handleNotify(msg: any): void {
                             userState.goldBean = Math.max(0, Number(userState.goldBean || 0) + delta);
                         }
                     }
+                }
+                if (rewardParts.length > 0) {
+                    log('推送', `物品推送: ${rewardParts.slice(0, 8).join(', ')}${rewardParts.length > 8 ? '…' : ''}`, {
+                        module: 'system',
+                        event: '物品推送',
+                        result: 'ok',
+                        count: rewardParts.length,
+                    });
                 }
             } catch {}
             return;
@@ -401,6 +424,12 @@ function handleNotify(msg: any): void {
                     }
                     if (userState.level !== oldLevel) {
                         recordOperation('levelUp', 1);
+                        log('系统', `升级到 Lv${userState.level}`, {
+                            module: 'system',
+                            event: '升级',
+                            result: 'ok',
+                            level: userState.level,
+                        });
                     }
                 }
             } catch {}
@@ -413,6 +442,12 @@ function handleNotify(msg: any): void {
                 const notify = types.FriendApplicationReceivedNotify.decode(eventBody);
                 const applications = notify.applications || [];
                 if (applications.length > 0) {
+                    log('好友', `收到好友申请 ${applications.length} 条`, {
+                        module: 'friend',
+                        event: '好友申请',
+                        result: 'ok',
+                        count: applications.length,
+                    });
                     networkEvents.emit('friendApplicationReceived', applications);
                 }
             } catch {}
@@ -426,7 +461,12 @@ function handleNotify(msg: any): void {
                 const friends = notify.friends || [];
                 if (friends.length > 0) {
                     const names = friends.map((f: any) => f.name || f.remark || `GID:${toNum(f.gid)}`).join(', ');
-                    log('好友', `新好友: ${names}`);
+                    log('好友', `新好友: ${names}`, {
+                        module: 'friend',
+                        event: '新好友',
+                        result: 'ok',
+                        count: friends.length,
+                    });
                 }
             } catch {}
             return;
@@ -438,6 +478,13 @@ function handleNotify(msg: any): void {
                 const notify = types.GoodsUnlockNotify.decode(eventBody);
                 const goods = notify.goods_list || [];
                 if (goods.length > 0) {
+                    const names = goods.slice(0, 5).map((g: any) => g.name || g.goods_name || `商品${toNum(g.id || g.goods_id)}`).join(', ');
+                    log('商城', `商品解锁 ${goods.length} 个: ${names}${goods.length > 5 ? '…' : ''}`, {
+                        module: 'shop',
+                        event: '商品解锁',
+                        result: 'ok',
+                        count: goods.length,
+                    });
                     networkEvents.emit('goodsUnlockNotify', goods);
                 }
             } catch {}
@@ -449,6 +496,18 @@ function handleNotify(msg: any): void {
             try {
                 const notify = types.TaskInfoNotify.decode(eventBody);
                 if (notify.task_info) {
+                    const info = notify.task_info;
+                    const growth = (info.growth_tasks || []).length;
+                    const daily = (info.daily_tasks || []).length;
+                    const other = (info.tasks || []).length;
+                    log('任务', `任务推送: 成长${growth}/每日${daily}/其他${other}`, {
+                        module: 'task',
+                        event: '任务推送',
+                        result: 'ok',
+                        growth,
+                        daily,
+                        other,
+                    });
                     networkEvents.emit('taskInfoNotify', notify.task_info);
                 }
             } catch {}
@@ -459,6 +518,7 @@ function handleNotify(msg: any): void {
         if (type.includes('VipInfoUpdatedNTF')) {
             try {
                 const notify = types.VipInfoUpdatedNTF.decode(eventBody);
+                log('推送', 'VIP 信息更新', { module: 'system', event: 'VIP推送', result: 'ok' });
                 networkEvents.emit('vipInfoUpdated', notify);
             } catch {}
             return;
@@ -468,6 +528,7 @@ function handleNotify(msg: any): void {
         if (type.includes('NeedNotify')) {
             try {
                 const notify = types.NeedNotify.decode(eventBody);
+                log('商城', '商城需求推送', { module: 'shop', event: '商城推送', result: 'ok' });
                 networkEvents.emit('mallNeedNotify', notify);
             } catch {}
             return;
@@ -477,6 +538,7 @@ function handleNotify(msg: any): void {
         if (type.includes('ProductsHasChangedNotify')) {
             try {
                 const notify = types.ProductsHasChangedNotify.decode(eventBody);
+                log('商城', '商品列表变更', { module: 'shop', event: '商城推送', result: 'ok' });
                 networkEvents.emit('productsChanged', notify);
             } catch {}
             return;
@@ -486,14 +548,54 @@ function handleNotify(msg: any): void {
         if (type.includes('ActiviesChangeNotify')) {
             try {
                 const notify = types.ActiviesChangeNotify.decode(eventBody);
+                const activities = notify.activities || [];
+                const names = activities.slice(0, 5).map((a: any) => {
+                    const name = String(a.name || '').trim();
+                    const id = toNum(a.activity_id);
+                    return name || `活动${id}`;
+                }).join(', ');
+                log('活动', `活动变更 ${activities.length} 个${names ? `: ${names}` : ''}${activities.length > 5 ? '…' : ''}`, {
+                    module: 'activity',
+                    event: '活动变更',
+                    result: 'ok',
+                    count: activities.length,
+                });
                 networkEvents.emit('activitiesChanged', notify);
             } catch {}
+            return;
+        }
+
+        // 游记通行证进度变更（偷菜/收获积分后推送）
+        if (type.includes('BattlePassChangeNotify')) {
+            try {
+                const notify = types.BattlePassChangeNotify.decode(eventBody);
+                const { applySeasonPassNotify } = require('../services/activity-center');
+                const pass = applySeasonPassNotify(notify.pass || notify.info);
+                if (pass) {
+                    log('活动', `${pass.title || '游记'} Lv${pass.level} ${pass.progress}/${pass.progressMax}`, {
+                        module: 'season',
+                        event: '游记进度变更',
+                        result: 'ok',
+                        level: pass.level,
+                        progress: pass.progress,
+                        progressMax: pass.progressMax,
+                    });
+                    networkEvents.emit('battlePassChanged', pass);
+                }
+            } catch (e: any) {
+                logWarn('活动', `BattlePassChangeNotify 解码失败: ${e && e.message ? e.message : e}`, {
+                    module: 'season',
+                    event: '游记进度变更',
+                    result: 'error',
+                });
+            }
             return;
         }
 
         // 头像框红点通知
         if (type.includes('AvatarFrameRedDotNotify')) {
             try {
+                log('推送', '红点推送: 头像框', { module: 'system', event: '红点推送', result: 'ok' });
                 networkEvents.emit('avatarFrameRedDot');
             } catch {}
             return;
@@ -502,6 +604,7 @@ function handleNotify(msg: any): void {
         // 图鉴奖励红点通知
         if (type.includes('IllustratedRewardRedDotNotifyV2')) {
             try {
+                log('推送', '红点推送: 图鉴奖励', { module: 'system', event: '红点推送', result: 'ok' });
                 networkEvents.emit('illustratedRewardRedDot');
             } catch {}
             return;
@@ -511,6 +614,7 @@ function handleNotify(msg: any): void {
         if (type.includes('RechargeInfoNotify')) {
             try {
                 const notify = types.RechargeInfoNotify.decode(eventBody);
+                log('推送', '充值信息变更', { module: 'system', event: '充值推送', result: 'ok' });
                 networkEvents.emit('rechargeInfoChanged', notify);
             } catch {}
             return;
@@ -520,6 +624,7 @@ function handleNotify(msg: any): void {
         if (type.includes('BulletinListChangedNTF')) {
             try {
                 const notify = types.BulletinListChangedNTF.decode(eventBody);
+                log('推送', '公告板变更', { module: 'system', event: '公告推送', result: 'ok' });
                 networkEvents.emit('bulletinListChanged', notify);
             } catch {}
             return;
@@ -529,6 +634,7 @@ function handleNotify(msg: any): void {
         if (type.includes('SkinChangeNotify')) {
             try {
                 const notify = types.SkinChangeNotify.decode(eventBody);
+                log('推送', '皮肤变更', { module: 'system', event: '皮肤推送', result: 'ok' });
                 networkEvents.emit('skinChanged', notify);
             } catch {}
             return;

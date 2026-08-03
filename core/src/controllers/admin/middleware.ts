@@ -10,6 +10,7 @@ const crypto = require('node:crypto');
 
 const store = require('../../models/store');
 const { normalizeAccountRef, resolveAccountId } = require('../../services/account-resolver');
+const { unbindSession } = require('./admin-sessions');
 
 interface AuthenticatedRequest extends Request {
     adminToken?: string;
@@ -65,8 +66,7 @@ function createAuthRequired(ctx: AdminContext) {
                 // 检查是否被封禁
                 if (req.currentUser.card.enabled === false) {
                     console.log('[请求拒绝] 用户已被封禁:', req.currentUser.username);
-                    ctx.tokens.delete(token);
-                    ctx.tokenUserMap.delete(token);
+                    unbindSession(ctx, token);
                     res.status(403).json({ ok: false, error: '账号已被封禁，请联系管理员' });
                     return;
                 }
@@ -76,8 +76,7 @@ function createAuthRequired(ctx: AdminContext) {
                     const now = Date.now();
                     if (req.currentUser.card.expiresAt < now) {
                         console.log('[请求拒绝] 用户已过期:', req.currentUser.username);
-                        ctx.tokens.delete(token);
-                        ctx.tokenUserMap.delete(token);
+                        unbindSession(ctx, token);
                         res.status(403).json({ ok: false, error: '账号已过期，请续费后重新登录' });
                         return;
                     }
@@ -124,8 +123,7 @@ function createCleanupExpiredUsers(ctx: AdminContext): () => void {
         }
 
         for (const { token, username, reason } of usersToCleanup) {
-            ctx.tokens.delete(token);
-            ctx.tokenUserMap.delete(token);
+            unbindSession(ctx, token);
             // 断开相关 socket 连接
             if (ctx.io) {
                 for (const socket of ctx.io.sockets.sockets.values()) {

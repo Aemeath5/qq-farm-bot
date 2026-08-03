@@ -653,6 +653,30 @@ function canAddAccount(username: string): { canAdd: boolean; current: number; li
     return { canAdd: true, current: 0, limit };
 }
 
+/** 会话恢复用：按用户名取公开用户信息（不含密码） */
+function getSessionUser(username: string): {
+    username: string;
+    role: string;
+    cardCode: string | null;
+    card: UserCard | null;
+    accountLimit: number;
+    mustChangePassword: boolean;
+} | null {
+    loadUsers();
+    const name = String(username || '').trim();
+    if (!name) return null;
+    const user = users.find(u => u.username === name);
+    if (!user) return null;
+    return {
+        username: user.username,
+        role: user.role,
+        cardCode: user.cardCode || null,
+        card: user.card || null,
+        accountLimit: user.accountLimit || DEFAULT_ACCOUNT_LIMIT,
+        mustChangePassword: !!user.mustChangePassword,
+    };
+}
+
 module.exports = {
     loadUsers,
     saveUsers,
@@ -677,6 +701,7 @@ module.exports = {
     getWxLoginConfig,
     getUserAccountLimit,
     canAddAccount,
+    getSessionUser,
     generateCardCode,
     DEFAULT_ACCOUNT_LIMIT,
 };

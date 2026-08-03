@@ -111,8 +111,100 @@ let landConfig: LandConfigItem[] | null = null;
 const landConfigMap = new Map<number, LandConfigItem>();
 const landCoordinateMap = new Map<string, LandConfigItem>();
 
+// 活动积分：运行时从 PlantInfo.field_36 / 收获奖励学习（无固定植物白名单）
+const runtimePlantScoreMap = new Map<number, number>();
+const activityScoreItemIds = new Set<number>([1019, 1022]);
+
 function getLandCoordinateKey(gridX: number, gridY: number): string {
     return `${gridX},${gridY}`;
+}
+
+function toFiniteNumber(value: unknown): number {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * 从已有 PlantActivityInfo（field_36）按积分语义提取：
+ * activity_id≈item_id, param1≈score, param2≈score_dup, date≈activity_key
+ */
+function extractActivityPointsFromField36(field36: any): { score: number; itemId: number; activityKey: number } | null {
+    if (!field36 || typeof field36 !== 'object') return null;
+    const itemId = toFiniteNumber(field36.activity_id ?? field36.item_id);
+    const score = toFiniteNumber(field36.param1 ?? field36.score);
+    const scoreDup = toFiniteNumber(field36.param2 ?? field36.score_dup);
+    const activityKey = toFiniteNumber(field36.date ?? field36.activity_key);
+    const finalScore = score > 0 ? score : scoreDup;
+    if (finalScore <= 0 && itemId <= 0) return null;
+    return { score: finalScore, itemId, activityKey };
+}
+
+function setRuntimePlantScore(plantId: number | string, score: number | string): void {
+    const id = toFiniteNumber(plantId);
+    const s = toFiniteNumber(score);
+    if (id <= 0 || s <= 0) return;
+    const prev = runtimePlantScoreMap.get(id) || 0;
+    if (s > prev) runtimePlantScoreMap.set(id, s);
+}
+
+function getPlantActivityScore(plantOrId: any): number {
+    if (plantOrId && typeof plantOrId === 'object') {
+        const points = extractActivityPointsFromField36(plantOrId.field_36 || plantOrId.activity_points);
+        if (points && points.score > 0) return points.score;
+        return 0;
+    }
+    const id = toFiniteNumber(plantOrId);
+    if (id <= 0) return 0;
+    return runtimePlantScoreMap.get(id) || 0;
+}
+
+function learnActivityPlant(plantId: number | string, _name: string = '', score: number | string = 0): boolean {
+    const id = toFiniteNumber(plantId);
+    if (id <= 0) return false;
+    const nextScore = Math.max(toFiniteNumber(score), getPlantActivityScore(id), 1);
+    setRuntimePlantScore(id, nextScore);
+    return true;
+}
+
+function markActivityScoreItemId(itemId: number | string): void {
+    const id = toFiniteNumber(itemId);
+    if (id > 0) activityScoreItemIds.add(id);
+}
+
+function isActivityScoreItemId(itemId: number | string): boolean {
+    const id = toFiniteNumber(itemId);
+    return id > 0 && (id === 1022 || id === 1019 || activityScoreItemIds.has(id));
+}
+
+function ingestDecodedPlant(plant: any): number {
+    if (!plant) return 0;
+    const plantId = toFiniteNumber(plant.id);
+    const points = extractActivityPointsFromField36(plant.field_36 || plant.activity_points);
+    if (!points) return 0;
+    if (points.itemId > 0) markActivityScoreItemId(points.itemId);
+    if (plantId > 0 && points.score > 0) {
+        setRuntimePlantScore(plantId, points.score);
+    }
+    return points.score;
+}
+
+function applyDecodedPlantActivityScores(lands: any[]): void {
+    for (const land of lands || []) {
+        ingestDecodedPlant(land && land.plant);
+    }
+}
+
+/** 是否活动作物：以 PlantInfo.field_36 为准（有积分 score>0） */
+function isActivityPlant(plantOrId: any): boolean {
+    if (plantOrId && typeof plantOrId === 'object') {
+        const points = extractActivityPointsFromField36(plantOrId.field_36 || plantOrId.activity_points);
+        return !!(points && points.score > 0);
+    }
+    return getPlantActivityScore(plantOrId) > 0;
+}
+
+function clearRuntimePlantScores(): void {
+    runtimePlantScoreMap.clear();
 }
 
 /**
@@ -433,4 +525,15 @@ module.exports = {
     getLandConfigById,
     getLandConfigByCoordinate,
     getAllLandConfigs,
+    // 活动积分（复用 PlantInfo.field_36）
+    isActivityPlant,
+    getPlantActivityScore,
+    setRuntimePlantScore,
+    learnActivityPlant,
+    markActivityScoreItemId,
+    isActivityScoreItemId,
+    ingestDecodedPlant,
+    applyDecodedPlantActivityScores,
+    clearRuntimePlantScores,
+    extractActivityPointsFromField36,
 };

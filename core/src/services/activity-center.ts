@@ -7,6 +7,7 @@ const LongModule = require('long');
 const { sendMsgAsync, GatewayError } = require('../utils/network');
 const { types } = require('../utils/proto');
 const { getItemById, getItemImageById } = require('../config/gameConfig');
+const { log, logWarn } = require('../utils/utils');
 const { getBag, getBagItems } = require('./warehouse');
 const {
     mergeConstellationStates,
@@ -255,7 +256,61 @@ function passDto(pass: any) {
         field14Items: (Array.isArray(pass.field_14) ? pass.field_14 : []).map(itemDto),
         rules: textContent(pass.rules_json),
         nodes,
+        updatedAt: Date.now(),
     };
+}
+
+/** 推送/主动拉取后的游记通行证缓存，供首页实时展示 */
+let liveTravelPass: ReturnType<typeof passDto> = null;
+
+function getLiveTravelPass() {
+    return liveTravelPass;
+}
+
+function applySeasonPassNotify(rawPass: any) {
+    const next = passDto(rawPass);
+    if (!next) return null;
+    if (liveTravelPass) {
+        if (liveTravelPass.title && !next.title) next.title = liveTravelPass.title;
+        if (liveTravelPass.activityId && (!next.activityId || next.activityId === '0')) {
+            next.activityId = liveTravelPass.activityId;
+        }
+        // 推送包常不带 nodes，保留已有节点以免进度条旁可领状态被清空
+        if ((!Array.isArray(next.nodes) || next.nodes.length === 0) && Array.isArray(liveTravelPass.nodes)) {
+            next.nodes = liveTravelPass.nodes;
+        }
+    }
+    liveTravelPass = next;
+    return liveTravelPass;
+}
+
+async function refreshSeasonPass(options: { silent?: boolean } = {}) {
+    const silent = !!options.silent;
+    try {
+        const reply = await querySeason();
+        const season = reply?.season_info;
+        const pass = applySeasonPassNotify(season?.pass);
+        if (pass && !silent) {
+            log('活动', `${pass.title || '游记'} Lv${pass.level} ${pass.progress}/${pass.progressMax}`, {
+                module: 'season',
+                event: '游记进度',
+                result: 'ok',
+                level: pass.level,
+                progress: pass.progress,
+                progressMax: pass.progressMax,
+            });
+        }
+        return pass;
+    } catch (e: any) {
+        if (!silent) {
+            logWarn('活动', `拉取游记进度失败: ${e && e.message ? e.message : e}`, {
+                module: 'season',
+                event: '游记进度',
+                result: 'error',
+            });
+        }
+        return null;
+    }
 }
 
 function solarTermDto(term: any) {
@@ -467,6 +522,7 @@ function normalizeSeason(reply: any) {
     const rawActivities = Array.isArray(season.activities) ? season.activities : [];
     const constellationActivity = findSeasonActivity(reply, CONSTELLATION_ACTIVITY_TYPE);
     const shopActivity = findSeasonActivity(reply, SHOP_ACTIVITY_TYPE);
+    const pass = applySeasonPassNotify(season.pass) || liveTravelPass;
     return {
         id: int64String(season.season_id),
         title: bytesToText(season.name),
@@ -478,7 +534,7 @@ function normalizeSeason(reply: any) {
         activities: rawActivities.map(activityDto),
         constellationActivity: constellationActivity ? activityDto(constellationActivity) : null,
         shopActivity: shopActivity ? activityDto(shopActivity) : null,
-        pass: passDto(season.pass),
+        pass,
     };
 }
 
@@ -794,10 +850,11 @@ async function claimBattlePassRewards() {
             body
         );
         const reply = types.ClaimBattlePassRewardsReply.decode(replyBody);
+        const nextPass = applySeasonPassNotify(reply.pass) || passDto(reply.pass);
         return {
             rewards: (Array.isArray(reply.rewards) ? reply.rewards : []).map(itemDto),
             field2Codes: (Array.isArray(reply.field_2) ? reply.field_2 : []).map(int64String),
-            pass: passDto(reply.pass),
+            pass: nextPass,
             snapshot: await getActivityCenterSnapshot(),
         };
     });
@@ -1031,4 +1088,7 @@ module.exports = {
     exchangeStarSandGoods,
     lightConstellation,
     claimSolarTerm,
+    applySeasonPassNotify,
+    refreshSeasonPass,
+    getLiveTravelPass,
 };

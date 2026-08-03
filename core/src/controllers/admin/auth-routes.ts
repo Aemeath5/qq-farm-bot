@@ -26,6 +26,7 @@ const {
     checkAccountAccess,
     handleApiError,
 } = require('./middleware');
+const { bindSession, unbindSession } = require('./admin-sessions');
 
 const adminLogger = createModuleLogger('admin');
 
@@ -101,8 +102,7 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
             }
 
             const token = issueToken();
-            ctx.tokens.add(token);
-            ctx.tokenUserMap.set(token, user);
+            bindSession(ctx, token, user);
 
             adminLogger.info('登录成功', { username, role: user.role, ip: clientIp });
 
@@ -290,8 +290,7 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
     app.post('/api/logout', (req: Request, res: Response) => {
         const token = (req as any).adminToken;
         if (token) {
-            ctx.tokens.delete(token);
-            ctx.tokenUserMap.delete(token);
+            unbindSession(ctx, token);
             if (ctx.io) {
                 for (const socket of ctx.io.sockets.sockets.values()) {
                     if (String((socket.data as any).adminToken || '') === String(token)) {

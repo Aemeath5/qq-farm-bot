@@ -7,6 +7,7 @@ const protobuf = require('protobufjs');
 const { sendMsgAsync, getUserState } = require('../../utils/network');
 const { types } = require('../../utils/proto');
 const { toLong, toNum, getServerTimeSec, sleep, randomDelay, log, logWarn } = require('../../utils/utils');
+const { applyDecodedPlantActivityScores } = require('../../config/gameConfig');
 
 // 操作限制更新回调 (由 friend.js 设置)
 let onOperationLimitsUpdate: ((limits: any) => void) | null = null;
@@ -36,6 +37,7 @@ async function getAllLands(): Promise<any> {
     const body = types.AllLandsRequest.encode(types.AllLandsRequest.create({})).finish();
     const { body: replyBody } = await sendMsgAsync('gamepb.plantpb.PlantService', 'AllLands', body);
     const reply = types.AllLandsReply.decode(replyBody);
+    applyDecodedPlantActivityScores(reply.lands);
     // 更新操作限制
     if (reply.operation_limits && onOperationLimitsUpdate) {
         onOperationLimitsUpdate(reply.operation_limits);

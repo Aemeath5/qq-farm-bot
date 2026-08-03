@@ -1,3 +1,43 @@
+# PB 数据解码工具
+
+离线解码抓包得到的 WebSocket Protobuf 帧，复用 `core` 内已加载的 proto 定义。实现位于 `core/src/utils/decode.ts`，入口为 `core/src/cli/pb-decode.ts`。
+
+## 使用方法
+
+在仓库根目录运行：
+
+```bash
+# 查看帮助
+pnpm pb-decode -- --help
+
+# 验证当前 proto 能否解码内置样本
+pnpm pb-decode -- --verify
+
+# 解码 base64（外层为 gatepb.Message，自动推断 body 类型）
+pnpm pb-decode -- --decode CigKGWdhbWVwYi... --gate
+
+# 解码 hex，并指定消息类型
+pnpm pb-decode -- --decode 0a1c0a19... --hex --type gatepb.Message
+```
+
+也可直接在 `core` 包内调用：
+
+```bash
+pnpm -C core pb-decode -- --decode <data> --gate
+```
+
+## 参数
+
+| 参数 | 说明 |
+|------|------|
+| `--decode <data>` | 进入解码模式；数据默认为 base64 |
+| `--hex` | 输入为 hex |
+| `--gate` | 外层是 `gatepb.Message`，打印 meta 并自动推断 body |
+| `--type <FQN>` | 指定完整消息类型名 |
+| `--verify` | 用 Login / AllLands / Harvest 样本校验 proto |
+
+未指定 `--gate` / `--type` 时，会先尝试按 `gatepb.Message` 解码，失败则做无 schema 的 wire 字段扫描。
+
 # 游戏配置下载工具
 
 `download-game-config.js` 用于从微信小程序当前 CDN 中定位、下载并解析以下资源：

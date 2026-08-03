@@ -105,7 +105,8 @@ qq-farm-bot/
 │   │   │   ├── farm/              # 农场核心（种植、土地分析、调度）
 │   │   │   └── friend/            # 好友系统（访问策略、GID 管理、调度）
 │   │   ├── types/                 # TypeScript 类型定义
-│   │   └── utils/                 # 工具函数（加密 WASM、网络、Proto 解析）
+│   │   ├── cli/                   # CLI 工具（PB 解码）
+│   │   └── utils/                 # 工具函数（加密 WASM、网络、Proto、PB 解码）
 │   └── data/                      # 运行时数据（账号、用户、卡密、日志等）
 ├── web/                           # 前端（Vue 3 + Vite）
 │   ├── src/
@@ -130,9 +131,10 @@ qq-farm-bot/
 │   │   └── activity-center/       # 活动中心静态图片资源
 │   └── dist/                      # 构建产物
 ├── tools/                         # 游戏配置 / 图片下载工具
-│   ├── README.md                  # 工具说明
+│   ├── README.md                  # 工具说明（含 PB 解码用法）
 │   ├── download-game-config.js    # 下载并解析游戏配置
 │   └── download-game-images.js    # 下载游戏图片资源
+│                                  # PB 解码: pnpm pb-decode -- --decode <data> --gate
 ├── docker-compose.yml             # Docker Compose 配置
 ├── pnpm-workspace.yaml            # pnpm 工作区
 └── package.json                   # 根 package.json（统一脚本）

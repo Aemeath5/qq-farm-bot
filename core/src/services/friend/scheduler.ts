@@ -43,15 +43,144 @@ let helpAutoDisabledByLimit: boolean = false;
 let badExecutedOnStartup: boolean = false;
 let badOperationLimitReached: boolean = false;
 
+/**
+ * 偷菜/帮助巡查：气泡（steal_plant_num 等）优先，同时轮巡气泡为 0 的好友。
+ * 好友一多时服务端气泡常滞后，两种方式并存，不能只靠气泡。
+ * 每轮轮巡数量 = 好友量的 1/4（至少 1）；已巡查写入 Set，扫完全员后清空。
+ */
+const stealPatrolVisited = new Set<number>();
+const helpPatrolVisited = new Set<number>();
+
+/** 上一轮好友气泡快照：gid -> { steal, dry, weed, insect, name } */
+const lastFriendBubbleSnapshot = new Map<number, { steal: number; dry: number; weed: number; insect: number; name: string }>();
+
+function formatBubbleDelta(label: string, curr: number, prev: number): string | null {
+    if (curr === prev) return null;
+    if (prev === 0 && curr > 0) return `${label}${curr}(+${curr})`;
+    if (curr === 0 && prev > 0) return `${label}清零`;
+    const delta = curr - prev;
+    const sign = delta > 0 ? `+${delta}` : `${delta}`;
+    return `${label}${curr}(${sign})`;
+}
+
+function logFriendBubbleDiff(friends: any[], myGid: number, blacklist: Set<number>): void {
+    const nextSnapshot = new Map<number, { steal: number; dry: number; weed: number; insect: number; name: string }>();
+    const changes: string[] = [];
+    const seen = new Set<number>();
+
+    for (const f of friends || []) {
+        const gid = toNum(f && f.gid);
+        if (!gid || gid === myGid || blacklist.has(gid) || seen.has(gid)) continue;
+        seen.add(gid);
+        const name = (f && (f.remark || f.name)) || `GID:${gid}`;
+        const p = f && f.plant;
+        const steal = p ? toNum(p.steal_plant_num) : 0;
+        const dry = p ? toNum(p.dry_num) : 0;
+        const weed = p ? toNum(p.weed_num) : 0;
+        const insect = p ? toNum(p.insect_num) : 0;
+        nextSnapshot.set(gid, { steal, dry, weed, insect, name });
+
+        const prev = lastFriendBubbleSnapshot.get(gid);
+        if (!prev) {
+            // 首次快照不刷屏；仅当本轮已有历史时才记「新增」
+            if (lastFriendBubbleSnapshot.size === 0) continue;
+            const parts: string[] = [];
+            if (steal > 0) parts.push(`可偷${steal}`);
+            if (dry > 0) parts.push(`干旱${dry}`);
+            if (weed > 0) parts.push(`草${weed}`);
+            if (insect > 0) parts.push(`虫${insect}`);
+            if (parts.length > 0) changes.push(`${name} ${parts.join('')}`);
+            continue;
+        }
+
+        const parts = [
+            formatBubbleDelta('可偷', steal, prev.steal),
+            formatBubbleDelta('干旱', dry, prev.dry),
+            formatBubbleDelta('草', weed, prev.weed),
+            formatBubbleDelta('虫', insect, prev.insect),
+        ].filter(Boolean) as string[];
+        if (parts.length > 0) changes.push(`${name} ${parts.join('')}`);
+    }
+
+    // 从列表消失且上次有气泡的好友
+    if (lastFriendBubbleSnapshot.size > 0) {
+        for (const [gid, prev] of lastFriendBubbleSnapshot.entries()) {
+            if (nextSnapshot.has(gid)) continue;
+            if (prev.steal > 0 || prev.dry > 0 || prev.weed > 0 || prev.insect > 0) {
+                changes.push(`${prev.name} 气泡消失`);
+            }
+        }
+    }
+
+    lastFriendBubbleSnapshot.clear();
+    for (const [gid, snap] of nextSnapshot.entries()) {
+        lastFriendBubbleSnapshot.set(gid, snap);
+    }
+
+    if (changes.length === 0) return;
+    const preview = changes.slice(0, 12).join('; ');
+    const more = changes.length > 12 ? ` 等${changes.length}人` : '';
+    log('好友', `气泡更新: ${preview}${more}`, {
+        module: 'friend',
+        event: '好友气泡',
+        result: 'ok',
+        count: changes.length,
+    });
+}
+
+/** 每轮轮巡数量：好友量的四分之一（向上取整，至少 1） */
+function getPatrolBatchSize(friendCount: number): number {
+    const count = Math.max(0, Number(friendCount) || 0);
+    if (count <= 0) return 0;
+    return Math.max(1, Math.ceil(count / 4));
+}
+
+function markPatrolVisited(kind: 'steal' | 'help', friendGid: number): void {
+    const gid = toNum(friendGid);
+    if (!gid) return;
+    if (kind === 'steal') stealPatrolVisited.add(gid);
+    else helpPatrolVisited.add(gid);
+}
+
+function clearPatrolVisited(kind?: 'steal' | 'help'): void {
+    if (!kind || kind === 'steal') stealPatrolVisited.clear();
+    if (!kind || kind === 'help') helpPatrolVisited.clear();
+}
+
+/**
+ * 从气泡为 0 的候选中取未标记好友；若本轮已扫完则清空标记后重新开始。
+ */
+function selectUnvisitedPatrol(candidates: any[], budget: number, kind: 'steal' | 'help'): any[] {
+    const list = Array.isArray(candidates) ? candidates : [];
+    const maxCount = Math.max(0, Number(budget) || 0);
+    if (list.length === 0 || maxCount <= 0) return [];
+
+    const visited = kind === 'steal' ? stealPatrolVisited : helpPatrolVisited;
+    let unmarked = list.filter((f: any) => {
+        const gid = toNum(f && f.gid);
+        return gid > 0 && !visited.has(gid);
+    });
+
+    if (unmarked.length === 0) {
+        visited.clear();
+        unmarked = list.filter((f: any) => toNum(f && f.gid) > 0);
+    }
+
+    return unmarked.slice(0, maxCount).map((friend: any) => ({ ...friend, isProbe: true }));
+}
+
+// 操作类型ID (与游戏/UI 对齐):
+// 10001 = 收获, 10002 = 铲除, 10003 = 放草, 10004 = 放虫
+// 10005 = 除草(帮好友), 10006 = 除虫(帮好友), 10007 = 浇水(帮好友), 10008 = 偷菜
 const OP_NAMES: Record<number, string> = {
-    10001: '浇水',
-    10002: '除虫',
-    10003: '除草',
-    10004: '偷菜',
-    10005: '放虫',
-    10006: '放草',
-    10007: '收获',
-    10008: '铲除',
+    10001: '收获',
+    10002: '铲除',
+    10003: '放草',
+    10004: '放虫',
+    10005: '除草',
+    10006: '除虫',
+    10007: '浇水',
+    10008: '偷菜',
 };
 
 // ============ 操作限制相关 ============
@@ -161,7 +290,7 @@ export function canGetExp(opId: number): boolean {
  */
 export function canOperate(opId: number): boolean {
     checkDailyReset();
-    if ((opId === 10005 || opId === 10006) && badOperationLimitReached) return false;
+    if ((opId === 10003 || opId === 10004) && badOperationLimitReached) return false;
     const limit: any = operationLimits.get(opId);
     if (!limit) return true;
     if (limit.dayTimesLimit <= 0) return true;
@@ -173,7 +302,7 @@ export function canOperate(opId: number): boolean {
  */
 export function getRemainingTimes(opId: number): number {
     checkDailyReset();
-    if ((opId === 10005 || opId === 10006) && badOperationLimitReached) return 0;
+    if ((opId === 10003 || opId === 10004) && badOperationLimitReached) return 0;
     const limit: any = operationLimits.get(opId);
     if (!limit || limit.dayTimesLimit <= 0) return 999;
     return Math.max(0, limit.dayTimesLimit - limit.dayTimes);
@@ -251,9 +380,12 @@ export async function checkFriends(options: CheckFriendsOptions = {}): Promise<b
         }
 
         const blacklist: Set<number> = new Set(getFriendBlacklist(accountId));
+        logFriendBubbleDiff(friends, toNum(state.gid), blacklist);
 
         const stealFriends: any[] = [];
         const helpFriends: any[] = [];
+        const stealProbeCandidates: any[] = [];
+        const helpProbeCandidates: any[] = [];
         const visitedGids: Set<number> = new Set();
 
         for (const f of friends) {
@@ -268,43 +400,66 @@ export async function checkFriends(options: CheckFriendsOptions = {}): Promise<b
             const dryNum: number = p ? toNum(p.dry_num) : 0;
             const weedNum: number = p ? toNum(p.weed_num) : 0;
             const insectNum: number = p ? toNum(p.insect_num) : 0;
+            const needsHelp: boolean = dryNum > 0 || weedNum > 0 || insectNum > 0;
 
             if (stealNum > 0 && effectiveStealEnabled) {
                 stealFriends.push({ gid, name, stealNum });
+            } else if (effectiveStealEnabled) {
+                stealProbeCandidates.push({ gid, name, stealNum: 0 });
             }
 
-            if ((dryNum > 0 || weedNum > 0 || insectNum > 0) && effectiveHelpEnabled) {
+            if (needsHelp && effectiveHelpEnabled) {
                 helpFriends.push({ gid, name, dryNum, weedNum, insectNum });
+            } else if (effectiveHelpEnabled) {
+                helpProbeCandidates.push({ gid, name, dryNum: 0, weedNum: 0, insectNum: 0 });
             }
 
             visitedGids.add(gid);
         }
 
-        // 排序：偷菜多的优先
+        // 气泡优先排序
         stealFriends.sort((a: any, b: any) => b.stealNum - a.stealNum);
-        // 排序：帮助需求多的优先
         helpFriends.sort((a: any, b: any) => {
             const helpA: number = a.dryNum + a.weedNum + a.insectNum;
             const helpB: number = b.dryNum + b.weedNum + b.insectNum;
             return helpB - helpA;
         });
 
+        // 气泡 + 轮巡并存：有气泡的先处理，同时按好友量 1/4 轮巡未标记好友
+        const stealFriendPoolSize: number = stealFriends.length + stealProbeCandidates.length;
+        const stealPatrolBudget: number = getPatrolBatchSize(stealFriendPoolSize);
+        const stealProbeFriends: any[] = effectiveStealEnabled
+            ? selectUnvisitedPatrol(stealProbeCandidates, stealPatrolBudget, 'steal')
+            : [];
+        const stealTargets: any[] = [...stealFriends, ...stealProbeFriends];
+
+        const helpFriendPoolSize: number = helpFriends.length + helpProbeCandidates.length;
+        const helpPatrolBudget: number = getPatrolBatchSize(helpFriendPoolSize);
+        const helpProbeFriends: any[] = effectiveHelpEnabled
+            ? selectUnvisitedPatrol(helpProbeCandidates, helpPatrolBudget, 'help')
+            : [];
+        const helpTargets: any[] = [...helpFriends, ...helpProbeFriends];
+
         const totalActions: any = { steal: 0, farming: 0, putBug: 0, putWeed: 0 };
 
-        // 第二阶段：批量偷菜
-        if (stealFriends.length > 0 && effectiveStealEnabled) {
-            // log('好友', `开始批量偷菜，共 ${stealFriends.length} 个好友有可偷`, {
-            //     module: 'friend', event: '开始批量偷菜', count: stealFriends.length
-            // });
+        // 第二阶段：批量偷菜（气泡优先 + 轮巡）
+        if (stealTargets.length > 0 && effectiveStealEnabled) {
+            log('好友', `偷菜巡查：气泡 ${stealFriends.length} + 轮巡 ${stealProbeFriends.length}`, {
+                module: 'friend',
+                event: '开始批量偷菜',
+                bubble: stealFriends.length,
+                patrol: stealProbeFriends.length,
+            });
 
-            for (const friend of stealFriends) {
-                if (!canOperate(10004)) break; // 偷菜次数用完
+            for (const friend of stealTargets) {
+                if (!canOperate(10008)) break; // 偷菜次数用完
 
                 try {
                     await visitFriendForSteal(friend, totalActions, state.gid, state.accountId);
                 } catch {
-                    // 单个好友失败不影响整体
+                    // ignore
                 }
+                markPatrolVisited('steal', friend.gid);
                 await randomDelay(500, 800);
             }
         }
@@ -318,15 +473,22 @@ export async function checkFriends(options: CheckFriendsOptions = {}): Promise<b
             }
         }
 
-        // 第三阶段：批量帮助
-        if (helpFriends.length > 0 && effectiveHelpEnabled) {
-            log('好友', `开始批量帮助，共 ${helpFriends.length} 个好友需要帮助`, {
-                module: 'friend', event: '开始批量帮助', count: helpFriends.length
+        // 第三阶段：批量帮助（含气泡为 0 的抽样探测）
+        if (helpTargets.length > 0 && effectiveHelpEnabled) {
+            log('好友', `开始批量帮助：气泡 ${helpFriends.length} + 轮巡 ${helpProbeFriends.length}`, {
+                module: 'friend', event: '开始批量帮助', count: helpFriends.length, patrol: helpProbeFriends.length
             });
 
-            for (let i: number = 0; i < helpFriends.length; i++) {
-                const friend: any = helpFriends[i];
-                log('好友', `批量帮助第 ${i + 1}/${helpFriends.length} 个好友: ${friend.name}`, { module: 'friend', event: '批量帮助开始', index: i + 1, total: helpFriends.length, friendName: friend.name });
+            for (let i: number = 0; i < helpTargets.length; i++) {
+                const friend: any = helpTargets[i];
+                const label: string = friend.isProbe ? '探测帮助' : '批量帮助';
+                log('好友', `${label}第 ${i + 1}/${helpTargets.length} 个好友: ${friend.name}`, {
+                    module: 'friend',
+                    event: friend.isProbe ? '探测帮助开始' : '批量帮助开始',
+                    index: i + 1,
+                    total: helpTargets.length,
+                    friendName: friend.name,
+                });
 
                 // 检查是否还能获得帮助经验
                 // const stopWhenExpLimit = !!isAutomationOn('friend_help_exp_limit');
@@ -337,12 +499,12 @@ export async function checkFriends(options: CheckFriendsOptions = {}): Promise<b
                 }
 
                 try {
-                    // await visitFriendForHelp(friend, totalActions, state.gid, state.accountId);
                     await visitFriendForHelp(friend, totalActions, state.gid, state.accountId, ignoreExpLimit);
                     log('好友', `批量帮助第 ${i + 1} 个好友完成: ${friend.name}`, { module: 'friend', event: '批量帮助完成', index: i + 1, friendName: friend.name });
                 } catch (e: any) {
                     log('好友', `批量帮助第 ${i + 1} 个好友失败: ${friend.name}, 错误: ${e.message}`, { module: 'friend', event: '批量帮助失败', index: i + 1, friendName: friend.name, error: e.message });
                 }
+                markPatrolVisited('help', friend.gid);
                 await randomDelay(500, 800);
             }
             log('好友', '批量帮助循环结束', { module: 'friend', event: '批量帮助结束' });
@@ -391,8 +553,8 @@ export async function checkFriends(options: CheckFriendsOptions = {}): Promise<b
                     if (isBadOperationLimitReached()) break;
 
                     // 检查是否还有捣乱次数
-                    const canPutBug: boolean = canOperate(10005);
-                    const canPutWeed: boolean = canOperate(10006);
+                    const canPutBug: boolean = canOperate(10004);
+                    const canPutWeed: boolean = canOperate(10003);
                     if (!canPutBug && !canPutWeed) {
                         log('好友', `放虫放草次数已用完，停止执行`, { module: 'friend', event: '放虫放草次数用完' });
                         break;
@@ -416,7 +578,7 @@ export async function checkFriends(options: CheckFriendsOptions = {}): Promise<b
         if (totalActions.putBug > 0) summary.push(`放虫${totalActions.putBug}`);
         if (totalActions.putWeed > 0) summary.push(`放草${totalActions.putWeed}`);
 
-        const totalVisited: number = stealFriends.length + helpFriends.length;
+        const totalVisited: number = stealTargets.length + helpTargets.length;
         if (summary.length > 0) {
             log('好友', `巡查完成 → ${summary.join('/')}`, {
                 module: 'friend', event: '好友巡查循环', result: 'ok', visited: totalVisited, summary
@@ -472,6 +634,7 @@ export function startFriendCheckLoop(options: StartOptions = {}): void {
 export function stopFriendCheckLoop(): void {
     friendLoopRunning = false;
     externalSchedulerMode = false;
+    clearPatrolVisited();
     clearAllInvalidKnownFriendGidCooldowns();
     clearFriendsListCache();
     networkEvents.off('friendApplicationReceived', onFriendApplicationReceived);
@@ -608,8 +771,8 @@ export async function runBadOnceOnStartup(): Promise<void> {
             if (isBadOperationLimitReached()) break;
 
             // 检查是否还有捣乱次数
-            const canPutBug: boolean = canOperate(10005);
-            const canPutWeed: boolean = canOperate(10006);
+            const canPutBug: boolean = canOperate(10004);
+            const canPutWeed: boolean = canOperate(10003);
             if (!canPutBug && !canPutWeed) {
                 log('好友', `放虫放草次数已用完，停止执行。已处理 ${processedCount} 个好友`, { module: 'friend', event: '放虫放草次数用完', processedCount });
                 break;

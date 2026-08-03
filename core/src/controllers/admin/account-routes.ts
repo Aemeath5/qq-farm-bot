@@ -10,6 +10,8 @@ const store = require('../../models/store');
 const { addOrUpdateAccount, deleteAccount } = store;
 const { findAccountByRef } = require('../../services/account-resolver');
 const userStore = require('../../models/user-store');
+const { extractCode, extractClientHints, normalizeLoginPlatform } = require('../../utils/login-url');
+const { applyLoginClientHintsToSystemConfig } = require('../../services/login-url-profile');
 
 const {
     getAccId,
@@ -19,6 +21,25 @@ const {
     getAccountList,
     resolveAccId,
 } = require('./middleware');
+
+function normalizeAccountLoginPayload(body: Record<string, any>): Record<string, any> {
+    const payload = { ...body };
+    const rawCode = String(payload.code || '').trim();
+    if (!rawCode) return payload;
+
+    const code = extractCode(rawCode) || rawCode;
+    const hints = extractClientHints(rawCode);
+    const platform = normalizeLoginPlatform(hints.platform) || normalizeLoginPlatform(payload.platform);
+
+    payload.code = code;
+    if (platform) payload.platform = platform;
+
+    if (hints.platform || hints.os || hints.ver) {
+        applyLoginClientHintsToSystemConfig(hints);
+    }
+
+    return payload;
+}
 
 function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
@@ -108,7 +129,9 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             }
 
             const resolvedUpdateId = isUpdate ? resolveAccId(ctx, body.id) : '';
-            const payload = isUpdate ? { ...body, id: resolvedUpdateId || String(body.id) } : body;
+            const payload = normalizeAccountLoginPayload(
+                isUpdate ? { ...body, id: resolvedUpdateId || String(body.id) } : body,
+            );
             let wasRunning = false;
             if (isUpdate && ctx.provider.isAccountRunning) {
                 wasRunning = ctx.provider.isAccountRunning(payload.id);

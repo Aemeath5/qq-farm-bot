@@ -264,7 +264,7 @@ function formatFertilizerLandTypes(types: any[] | undefined | null): string[] {
     return normalizeFertilizerLandTypes(types).map(type => FERTILIZER_LAND_TYPE_LABELS[type] || type);
 }
 
-function analyzeLands(lands: any[], debug?: boolean, ownGid?: number): {
+function analyzeLands(lands: any[], debug?: boolean, _ownGid?: number): {
     harvestable: number[];
     needWater: number[];
     needWeed: number[];
@@ -350,31 +350,13 @@ function analyzeLands(lands: any[], debug?: boolean, ownGid?: number): {
         }
 
         const weedsTime = toTimeSec(currentPhase.weeds_time);
-        let hasWeeds = weedsTime > 0 && weedsTime <= nowSec;
-        if (!hasWeeds && plant.weed_owners && plant.weed_owners.length > 0) {
-            // 如果指定了 ownGid，检查是否只有自己放的草
-            if (ownGid) {
-                const isOwnWeeds = plant.weed_owners.every((id: any) => toNum(id) === ownGid);
-                hasWeeds = !isOwnWeeds; // 只有自己放的草 → 不需要除
-            } else {
-                hasWeeds = true;
-            }
-        }
+        const hasWeeds = (plant.weed_owners && plant.weed_owners.length > 0) || (weedsTime > 0 && weedsTime <= nowSec);
         if (hasWeeds) {
             result.needWeed.push(id);
         }
 
         const insectTime = toTimeSec(currentPhase.insect_time);
-        let hasBugs = insectTime > 0 && insectTime <= nowSec;
-        if (!hasBugs && plant.insect_owners && plant.insect_owners.length > 0) {
-            // 如果指定了 ownGid，检查是否只有自己放的虫
-            if (ownGid) {
-                const isOwnBugs = plant.insect_owners.every((id: any) => toNum(id) === ownGid);
-                hasBugs = !isOwnBugs; // 只有自己放的虫 → 不需要除
-            } else {
-                hasBugs = true;
-            }
-        }
+        const hasBugs = (plant.insect_owners && plant.insect_owners.length > 0) || (insectTime > 0 && insectTime <= nowSec);
         if (hasBugs) {
             result.needBug.push(id);
         }
@@ -383,6 +365,61 @@ function analyzeLands(lands: any[], debug?: boolean, ownGid?: number): {
     }
 
     return result;
+}
+
+/**
+ * LandsNotify 推送摘要：成熟/可偷/草/虫/干旱
+ */
+function summarizeLandsPush(lands: any[]): string {
+    const list: any[] = Array.isArray(lands) ? lands : [];
+    if (list.length === 0) return '无土地变化';
+
+    const nowSec: number = getServerTimeSec();
+    const parts: string[] = [];
+
+    for (const land of list) {
+        const id = toNum(land && land.id);
+        if (id <= 0) continue;
+        const plant = land && land.plant;
+        if (!plant || !plant.phases || plant.phases.length === 0) continue;
+
+        const currentPhase = getCurrentPhase(plant.phases, false, `土地#${id}`);
+        if (!currentPhase) continue;
+        const phaseVal = toNum(currentPhase.phase);
+        const plantId = toNum(plant.id);
+        const name = getPlantName(plantId) || plant.name || '';
+        const nameHint = name ? `(${name})` : '';
+
+        if (phaseVal === PlantPhase.MATURE) {
+            if (plant.stealable) {
+                parts.push(`可偷#${id}${nameHint}`);
+            } else {
+                parts.push(`成熟可收#${id}${nameHint}`);
+            }
+            continue;
+        }
+        if (phaseVal === PlantPhase.DEAD) continue;
+
+        const tags: string[] = [];
+        const dryNum = toNum(plant.dry_num);
+        const dryTime = toTimeSec(currentPhase.dry_time);
+        if (dryNum > 0 || (dryTime > 0 && dryTime <= nowSec)) tags.push('干旱');
+
+        const weedsTime = toTimeSec(currentPhase.weeds_time);
+        const hasWeeds = (plant.weed_owners && plant.weed_owners.length > 0) || (weedsTime > 0 && weedsTime <= nowSec);
+        if (hasWeeds) tags.push('有草');
+
+        const insectTime = toTimeSec(currentPhase.insect_time);
+        const hasBugs = (plant.insect_owners && plant.insect_owners.length > 0) || (insectTime > 0 && insectTime <= nowSec);
+        if (hasBugs) tags.push('有虫');
+
+        if (tags.length > 0) {
+            parts.push(`${tags.join('')}#${id}${nameHint}`);
+        }
+    }
+
+    if (parts.length === 0) return `${list.length}块状态更新`;
+    return `${list.length}块: ${parts.join('; ')}`;
 }
 
 function buildLandMap(lands: any[] | undefined | null): Map<number, any> {
@@ -602,6 +639,7 @@ module.exports = {
     filterLandIdsByTypes,
     formatFertilizerLandTypes,
     analyzeLands,
+    summarizeLandsPush,
     buildLandMap,
     buildPlantingLayouts,
     selectNonOverlappingLayouts,

@@ -271,7 +271,26 @@ function startFarmCheckLoop(options: { externalScheduler?: boolean } = {}): void
     startFertilizerBuyCheckTimer();
 }
 
-function onLandsChangedPush(lands: any[]): void {
+function onLandsChangedPush(payload: any): void {
+    const lands: any[] = Array.isArray(payload) ? payload : ((payload && payload.lands) || []);
+    const hostGid: number = Array.isArray(payload)
+        ? 0
+        : toNum(payload && payload.hostGid);
+    const myGid: number = toNum((getUserState() || {}).gid);
+    // 仅自家农场推送触发巡田；好友农场推送由拜访会话消费
+    if (hostGid !== 0 && myGid > 0 && hostGid !== myGid) {
+        return;
+    }
+
+    const { summarizeLandsPush } = require('./land-analysis');
+    const summary: string = summarizeLandsPush(lands);
+    log('农场', `土地推送 ${summary}`, {
+        module: 'farm',
+        event: 'lands_notify',
+        result: 'ok',
+        count: lands.length,
+    });
+
     if (!isAutomationOn('farm_push')) {
         return;
     }
@@ -279,9 +298,6 @@ function onLandsChangedPush(lands: any[]): void {
     const now: number = Date.now();
     if (now - lastPushTime < 500) return;
     lastPushTime = now;
-    log('农场', `收到推送: ${lands.length}块土地变化，检查中...`, {
-        module: 'farm', event: '土地推送通知', result: 'trigger_check', count: lands.length
-    });
     farmScheduler.setTimeoutTask('farm_push_check', 100, async () => {
         if (!isCheckingFarm) await checkFarm();
     });

@@ -213,7 +213,7 @@ const currentAccountName = computed(() => {
 })
 
 const localStrategySettings = ref({
-  plantingStrategy: 'max_exp',
+  plantingStrategy: 'preferred',
   preferredSeedId: 0,
   bagSeedPriority: [] as number[],
   bagSeedFallbackStrategy: 'level',
@@ -696,6 +696,7 @@ const localAutomationSettings = ref({
     farm_push: false,
     land_upgrade: true,
     friend_steal: false,
+    friend_steal_activity_only: false,
     friend_help: false,
     friend_bad: true,
     friend_help_exp_limit: false,
@@ -734,6 +735,7 @@ function syncLocalAutomationSettings() {
         farm_push: false,
         land_upgrade: false,
         friend_steal: false,
+        friend_steal_activity_only: false,
         friend_help: false,
         friend_bad: false,
         friend_help_exp_limit: false,
@@ -756,6 +758,7 @@ function syncLocalAutomationSettings() {
         farm_push: false,
         land_upgrade: false,
         friend_steal: false,
+        friend_steal_activity_only: false,
         friend_help: false,
         friend_bad: false,
         friend_help_exp_limit: false,
@@ -1540,14 +1543,27 @@ async function handleTestOffline() {
             </p>
           </div>
 
-          <div v-if="localAutomationSettings.automation.friend" class="flex flex-wrap gap-4 rounded bg-blue-50 p-3 text-sm dark:bg-blue-900/20">
+          <div v-if="localAutomationSettings.automation.friend" class="space-y-2">
+            <div class="flex flex-wrap gap-4 rounded bg-blue-50 p-3 text-sm dark:bg-blue-900/20">
               <BaseSwitch v-model="localAutomationSettings.automation.friend_steal" label="自动偷菜" />
+              <BaseSwitch
+                v-model="localAutomationSettings.automation.friend_steal_activity_only"
+                label="只偷活动作物"
+                :disabled="!localAutomationSettings.automation.friend_steal"
+              />
               <BaseSwitch v-model="localAutomationSettings.automation.friend_help" label="自动帮忙" />
               <BaseSwitch v-model="localAutomationSettings.automation.friend_bad" label="自动捣乱" />
               <BaseSwitch v-model="localAutomationSettings.automation.friend_help_exp_limit" label="经验满不帮忙" />
             </div>
+            <p
+              v-if="localAutomationSettings.automation.friend_steal && localAutomationSettings.automation.friend_steal_activity_only"
+              class="text-xs text-blue-700/90 dark:text-blue-200/85"
+            >
+              开启后仅偷取协议/运行时检测到「积分 > 0」的作物（无固定白名单）。
+            </p>
+          </div>
 
-            <div class="space-y-3">
+          <div class="space-y-3">
               <div class="border border-amber-200 rounded bg-amber-50/60 p-3 dark:border-amber-800/60 dark:bg-amber-900/10">
                 <div class="mb-2 text-sm text-amber-800 font-medium dark:text-amber-300">
                   施肥范围

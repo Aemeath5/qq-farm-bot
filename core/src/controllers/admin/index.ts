@@ -15,6 +15,7 @@ const { createModuleLogger } = require('../../services/logger');
 
 const { createAdminContext } = require('./context');
 const { createCleanupExpiredUsers } = require('./middleware');
+const { loadPersistedSessions } = require('./admin-sessions');
 const { mountAuthRoutes } = require('./auth-routes');
 const { mountAccountRoutes } = require('./account-routes');
 const { mountFarmRoutes } = require('./farm-routes');
@@ -36,6 +37,7 @@ function startAdminServer(dataProvider: any): void {
     if (ctx) return;
 
     ctx = createAdminContext(dataProvider);
+    loadPersistedSessions(ctx);
 
     const app = express();
     app.set('trust proxy', true);

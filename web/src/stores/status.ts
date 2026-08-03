@@ -91,6 +91,9 @@ export const useStatusStore = defineStore('status', () => {
   }
 
   function handleRealtimeLogsSnapshot(payload: any) {
+    // 过滤开启时关闭 realtime append，同时忽略无过滤 snapshot，避免短暂露出全量日志
+    if (!realtimeLogsEnabled.value)
+      return
     const body = (payload && typeof payload === 'object') ? payload : {}
     const list = Array.isArray(body.logs) ? body.logs : []
     logs.value = list.map((item: any) => normalizeLogEntry(item))

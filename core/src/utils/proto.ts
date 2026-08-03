@@ -102,6 +102,8 @@ async function loadProto(): Promise<void> {
     types.FertilizeReply = root.lookupType('gamepb.plantpb.FertilizeReply');
     types.PutSocialItemRequest = root.lookupType('gamepb.plantpb.PutSocialItemRequest');
     types.PutSocialItemReply = root.lookupType('gamepb.plantpb.PutSocialItemReply');
+    types.CheckCanOperateRequest = root.lookupType('gamepb.plantpb.CheckCanOperateRequest');
+    types.CheckCanOperateReply = root.lookupType('gamepb.plantpb.CheckCanOperateReply');
 
     // 背包/仓库
     types.BagRequest = root.lookupType('gamepb.itempb.BagRequest');
@@ -318,4 +320,9 @@ async function loadProto(): Promise<void> {
     log('系统', 'Protobuf 定义加载完成');
 }
 
-module.exports = { loadProto, types };
+function getRoot(): protobuf.Root {
+    if (!root) throw new Error('Protobuf 尚未加载，请先调用 loadProto()');
+    return root;
+}
+
+module.exports = { loadProto, types, getRoot };

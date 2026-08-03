@@ -22,6 +22,7 @@ module.exports = {
     deleteCardsBatch: users.deleteCardsBatch,
     deleteUser: users.deleteUser,
     changePassword: users.changePassword,
+    getSessionUser: users.getSessionUser,
     DEFAULT_ACCOUNT_LIMIT: users.DEFAULT_ACCOUNT_LIMIT,
     addLoginLog: auth.addLoginLog,
     getLoginLogs: auth.getLoginLogs,

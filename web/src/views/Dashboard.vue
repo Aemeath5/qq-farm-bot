@@ -7,6 +7,7 @@ import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import { useAccountStore } from '@/stores/account'
+import { useActivityCenterStore } from '@/stores/activity-center'
 import { useBagStore } from '@/stores/bag'
 import { useStatusStore } from '@/stores/status'
 import { useToastStore } from '@/stores/toast'
@@ -15,6 +16,7 @@ const statusStore = useStatusStore()
 const accountStore = useAccountStore()
 const bagStore = useBagStore()
 const toastStore = useToastStore()
+const activityCenterStore = useActivityCenterStore()
 const {
   status,
   logs: statusLogs,
@@ -23,6 +25,7 @@ const {
 } = storeToRefs(statusStore)
 const { currentAccountId, currentAccount } = storeToRefs(accountStore)
 const { dashboardItems } = storeToRefs(bagStore)
+const { season: activitySeason } = storeToRefs(activityCenterStore)
 const logContainer = ref<HTMLElement | null>(null)
 const autoScroll = ref(true)
 const lastBagFetchAt = ref(0)
@@ -52,12 +55,51 @@ const hasActiveLogFilter = computed(() =>
   !!(filter.module || filter.event || filter.keyword || filter.isWarn),
 )
 
+/** 客户端过滤，对齐服务端 filterLogs，防止 snapshot 闪全量 */
+const filteredLogs = computed(() => {
+  const list = allLogs.value || []
+  const moduleName = String(filter.module || '').trim()
+  const eventName = String(filter.event || '').trim()
+  const keyword = String(filter.keyword || '').trim().toLowerCase()
+  const keywordTerms = keyword ? keyword.split(/\s+/).filter(Boolean) : []
+  const warnFilter = filter.isWarn
+
+  return list.filter((l: any) => {
+    if (moduleName) {
+      const logModule = String((l.meta || {}).module || '')
+      if (moduleName === 'system') {
+        const isSystemTag = String(l.tag || '') === '系统' || String(l.tag || '') === '错误'
+        if (logModule !== 'system' && !isSystemTag)
+          return false
+      }
+      else if (logModule !== moduleName) {
+        return false
+      }
+    }
+    if (eventName && String((l.meta || {}).event || '') !== eventName)
+      return false
+    if (warnFilter === 'warn' && !l.isWarn)
+      return false
+    if (warnFilter === 'info' && l.isWarn)
+      return false
+    if (keywordTerms.length > 0) {
+      const text = String(l._searchText || `${l.msg || ''} ${l.tag || ''}`).toLowerCase()
+      for (const term of keywordTerms) {
+        if (!text.includes(term))
+          return false
+      }
+    }
+    return true
+  })
+})
+
 const modules = [
   { label: '所有模块', value: '' },
   { label: '农场', value: 'farm' },
   { label: '好友', value: 'friend' },
   { label: '仓库', value: 'warehouse' },
   { label: '任务', value: 'task' },
+  { label: '活动', value: 'activity' },
   { label: '系统', value: 'system' },
 ]
 
@@ -75,6 +117,8 @@ const events = [
   { label: '开启礼包', value: 'fertilizer_gift_open' },
   { label: '获取任务', value: 'task_scan' },
   { label: '完成任务', value: 'task_claim' },
+  { label: '任务推送', value: '任务推送' },
+  { label: '活动变更', value: '活动变更' },
   { label: '免费礼包', value: 'mall_free_gifts' },
   { label: '分享奖励', value: 'daily_share' },
   { label: '会员礼包', value: 'vip_daily_gift' },
@@ -82,10 +126,22 @@ const events = [
   { label: '图鉴奖励', value: 'illustrated_rewards' },
   { label: '邮箱领取', value: 'email_rewards' },
   { label: '出售成功', value: 'sell_success' },
-  { label: '土地升级', value: 'upgrade_land' },
-  { label: '土地解锁', value: 'unlock_land' },
-  { label: '好友巡查', value: 'friend_cycle' },
-  { label: '访问好友', value: 'visit_friend' },
+  { label: '土地升级', value: '升级土地' },
+  { label: '土地解锁', value: '解锁土地' },
+  { label: '好友巡查', value: '好友巡查循环' },
+  { label: '好友气泡', value: '好友气泡' },
+  { label: '开始批量偷菜', value: '开始批量偷菜' },
+  { label: '偷好友菜', value: '偷好友菜' },
+  { label: '偷取积分', value: '偷取积分' },
+  { label: '游记进度', value: '游记进度' },
+  { label: '游记进度变更', value: '游记进度变更' },
+  { label: '开始批量帮助', value: '开始批量帮助' },
+  { label: '帮助好友', value: '帮助好友' },
+  { label: '照顾好友', value: '照顾好友' },
+  { label: '进入农场', value: '进入农场' },
+  { label: '物品推送', value: '物品推送' },
+  { label: '红点推送', value: '红点推送' },
+  { label: '商城推送', value: '商城推送' },
 ]
 
 const eventLabelMap: Record<string, string> = Object.fromEntries(
@@ -320,6 +376,29 @@ function getExpPercent(p: any) {
   return Math.min(100, Math.max(0, (p.current / p.needed) * 100))
 }
 
+const travelPass = computed(() => status.value?.status?.travelPass || activitySeason.value?.pass || null)
+
+function getTravelPassPercent(pass: { progress?: number | null, progressMax?: number | null } | null) {
+  if (!pass)
+    return 0
+  const progress = Number(pass.progress)
+  const progressMax = Number(pass.progressMax)
+  if (!Number.isFinite(progress) || !Number.isFinite(progressMax) || progressMax <= 0)
+    return 0
+  return Math.min(100, Math.max(0, (progress / progressMax) * 100))
+}
+
+async function refreshTravelPass(force = false) {
+  if (!currentAccountId.value)
+    return
+  if (!status.value?.connection?.connected)
+    return
+  if (force)
+    await activityCenterStore.refresh(currentAccountId.value)
+  else
+    await activityCenterStore.lazyLoad(currentAccountId.value)
+}
+
 async function refreshBag(force = false) {
   if (!currentAccountId.value)
     return
@@ -358,6 +437,7 @@ async function refresh(forceReloadLogs = false) {
 
     // 仅在账号已运行且连接就绪后拉背包，避免启动阶段触发500
     await refreshBag()
+    await refreshTravelPass()
   }
 }
 
@@ -375,9 +455,16 @@ watch(currentAccountId, async () => {
 })
 
 watch(() => status.value?.connection?.connected, (connected) => {
-  if (connected)
+  if (connected) {
     refreshBag(true)
+    refreshTravelPass(true)
+  }
 })
+
+watch(() => status.value?.status?.travelPass, (pass) => {
+  if (pass)
+    activityCenterStore.applyPass(pass)
+}, { deep: true })
 
 watch(() => JSON.stringify(status.value?.operations || {}), (next, prev) => {
   if (!realtimeConnected.value || next === prev)
@@ -422,7 +509,7 @@ async function clearLogs() {
 }
 
 // Auto scroll logs
-watch(allLogs, () => {
+watch(filteredLogs, () => {
   nextTick(() => {
     if (logContainer.value && autoScroll.value) {
       logContainer.value.scrollTop = logContainer.value.scrollHeight
@@ -534,6 +621,27 @@ useIntervalFn(updateCountdowns, 1000)
             <div class="text-2xl text-amber-500 font-bold dark:text-amber-400">
               {{ status?.status?.goldBean || 0 }}
             </div>
+          </div>
+        </div>
+        <div
+          v-if="travelPass"
+          class="mt-3"
+        >
+          <div class="mb-1 flex items-center justify-between text-xs text-gray-500">
+            <div class="flex min-w-0 items-center gap-1.5">
+              <div class="i-fas-star text-amber-400" />
+              <span class="truncate" :title="travelPass.title || '游记积分'">{{ travelPass.title || '游记积分' }}</span>
+            </div>
+            <span>Lv.{{ travelPass.level || 0 }}</span>
+          </div>
+          <div class="h-1.5 w-full overflow-hidden rounded-full bg-gray-100 dark:bg-gray-700">
+            <div
+              class="h-full rounded-full bg-amber-400 transition-all duration-500"
+              :style="{ width: `${getTravelPassPercent(travelPass)}%` }"
+            />
+          </div>
+          <div class="mt-1 text-right text-[10px] text-gray-400">
+            {{ travelPass.progress ?? 0 }} / {{ travelPass.progressMax ?? '?' }}
           </div>
         </div>
         <div class="mt-4 border-t border-gray-100 pt-3 dark:border-gray-700">
@@ -666,10 +774,10 @@ useIntervalFn(updateCountdowns, 1000)
           </div>
 
           <div ref="logContainer" class="max-h-[50vh] min-h-0 flex-1 overflow-y-auto rounded-xl bg-gray-50 p-4 text-sm leading-relaxed font-mono dark:bg-gray-900" @scroll="onLogScroll">
-            <div v-if="!allLogs.length" class="py-8 text-center text-gray-400">
+            <div v-if="!filteredLogs.length" class="py-8 text-center text-gray-400">
               暂无日志
             </div>
-            <div v-for="log in allLogs" :key="log.ts + log.msg" class="mb-1 break-all">
+            <div v-for="log in filteredLogs" :key="log.ts + log.msg" class="mb-1 break-all">
               <span class="mr-2 select-none text-gray-400">[{{ formatLogTime(log.time) }}]</span>
               <span class="mr-2 rounded-full px-1.5 py-0.5 text-xs font-bold" :class="getLogTagClass(log.tag)">{{ log.tag }}</span>
               <span v-if="log.meta?.event" class="mr-2 rounded-full bg-blue-50 px-1.5 py-0.5 text-xs text-blue-500 dark:bg-blue-900/20 dark:text-blue-400">{{ getEventLabel(log.meta.event) }}</span>

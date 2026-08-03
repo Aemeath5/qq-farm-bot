@@ -15,6 +15,7 @@ const {
     createAuthRequired,
     adminRequired,
 } = require('./middleware');
+const { unbindSession, persistSessions } = require('./admin-sessions');
 
 function mountAdminRoutes(app: Application, ctx: AdminContext): void {
     const authRequired = createAuthRequired(ctx);
@@ -325,6 +326,7 @@ function mountAdminRoutes(app: Application, ctx: AdminContext): void {
                     ctx.tokenUserMap.set(token, user);
                 }
             }
+            persistSessions(ctx);
 
             res.json({ ok: true, data: result.user });
         } catch (e: any) {
@@ -349,15 +351,16 @@ function mountAdminRoutes(app: Application, ctx: AdminContext): void {
                 return res.status(400).json(result);
             }
             // 强制下线该用户的所有会话
+            const tokensToKick: string[] = [];
             for (const [token, user] of ctx.tokenUserMap.entries()) {
-                if (user.username === username) {
-                    ctx.tokens.delete(token);
-                    ctx.tokenUserMap.delete(token);
-                    if (ctx.io) {
-                        for (const socket of ctx.io.sockets.sockets.values()) {
-                            if (String((socket.data as any).adminToken || '') === String(token)) {
-                                socket.disconnect(true);
-                            }
+                if (user.username === username) tokensToKick.push(token);
+            }
+            for (const token of tokensToKick) {
+                unbindSession(ctx, token);
+                if (ctx.io) {
+                    for (const socket of ctx.io.sockets.sockets.values()) {
+                        if (String((socket.data as any).adminToken || '') === String(token)) {
+                            socket.disconnect(true);
                         }
                     }
                 }
