@@ -981,6 +981,10 @@ async function runFertilizerByConfig(plantedLands: any[] = [], options: { skipNo
             logWarn('施肥', `获取全农场地块失败 ${e.message}`);
         }
 
+        if (landTypeById.size > 0) {
+            organicTargets = filterLandIdsByTypes(organicTargets, landTypeById, selectedLandTypes);
+        }
+
         if (organicTargets.length > 0) {
             fertilizedOrganic = await fertilizeOrganicLoop(organicTargets);
             if (fertilizedOrganic > 0) {
