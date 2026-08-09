@@ -13,10 +13,6 @@ const { getAllLands, harvest, farming, unlockLand, upgradeLand } = require('./ap
 const { analyzeLands, resolveRemovableHarvestedLands } = require('./land-analysis');
 const { autoPlantEmptyLands, runFertilizerByConfig } = require('./planting');
 const { checkAndBuyFertilizerBoth } = require('../mall');
-// 延迟加载以打破循环依赖: visit-strategy → farm/index → scheduler → visit-strategy
-function inFriendQuietHours() {
-    return require('../friend/visit-strategy').inFriendQuietHours();
-}
 
 // ============ 内部状态 ============
 let isCheckingFarm: boolean = false;
@@ -33,7 +29,6 @@ let lastPushTime: number = 0;
 async function checkFarm(): Promise<boolean> {
     const state = getUserState();
     if (isCheckingFarm || !state.gid || !isAutomationOn('farm')) return false;
-    if (inFriendQuietHours()) return false;
     isCheckingFarm = true;
 
     try {
