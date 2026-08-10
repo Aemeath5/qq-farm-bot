@@ -256,34 +256,28 @@ async function runHelpTick(auto: any): Promise<void> {
     if (helpTaskRunning) {
         return;
     }
-    if (!auto.friend_help) {
-        return;
-    }
-    // 检查是否开启了经验满不帮忙，且经验已达上限
-    const stopWhenExpLimit = !!auto.friend_help_exp_limit;
-    if (stopWhenExpLimit && isHelpExpLimitReached()) {
-        // 计算下次调度时间，但不执行巡查
-        const helpMs = randomIntervalMs(
-            workerConfig.helpCheckIntervalMin || 10000,
-            workerConfig.helpCheckIntervalMax || 10000
-        );
-        nextHelpRunAt = Date.now() + helpMs;
-        return;
-    }
     helpTaskRunning = true;
     const helpMs = randomIntervalMs(
         workerConfig.helpCheckIntervalMin || 10000,
         workerConfig.helpCheckIntervalMax || 10000
     );
-    //log('系统', `帮助巡查开始执行，下次间隔 ${helpMs}ms`, { module: 'system', event: '帮助巡查', result: 'start', intervalMs: helpMs });
     try {
-        await checkFriends({ onlyHelp: true });
+        // 帮助巡查
+        if (auto.friend_help) {
+            const stopWhenExpLimit = !!auto.friend_help_exp_limit;
+            if (!stopWhenExpLimit || !isHelpExpLimitReached()) {
+                await checkFriends({ onlyHelp: true });
+            }
+        }
+        // 捣乱独立于帮助执行，不受 friend_help 开关和经验上限影响
+        if (auto.friend_bad) {
+            await checkFriends({ onlyBad: true });
+        }
     } catch (e: any) {
-        log('系统', `帮助巡查执行失败: ${e.message}`, { module: 'system', event: '帮助巡查', result: 'error' });
+        log('系统', `巡查执行失败: ${e.message}`, { module: 'system', event: '巡查', result: 'error' });
     } finally {
         nextHelpRunAt = Date.now() + helpMs;
         helpTaskRunning = false;
-       // log('系统', `帮助巡查执行完成，下次执行时间: ${new Date(nextHelpRunAt).toISOString()}`, { module: 'system', event: '帮助巡查', result: 'done', nextRunAt: nextHelpRunAt });
     }
 }
 
