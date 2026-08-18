@@ -2,7 +2,7 @@
  * 拜访好友策略 - 访问逻辑、好友分析、错误处理、安静时段
  */
 
-const { CONFIG, PlantPhase, PHASE_NAMES } = require('../../config/config');
+const { PlantPhase, PHASE_NAMES } = require('../../config/config');
 const { getPlantName, getPlantById, getSeedImageBySeedId, getPlantGrowTime } = require('../../config/gameConfig');
 const {
     isAutomationOn,
@@ -12,7 +12,7 @@ const {
     getFriendsListCacheTtlSec,
 } = require('../../models/store');
 const { getUserState } = require('../../utils/network');
-const { toNum, toLong, toTimeSec, getServerTimeSec, log, logWarn, sleep, randomDelay } = require('../../utils/utils');
+const { toNum, toTimeSec, getServerTimeSec, getSystemClockMinutes, log, logWarn, sleep, randomDelay } = require('../../utils/utils');
 const { types } = require('../../utils/proto');
 const { getCurrentPhase, buildLandMap, getDisplayLandContext, isOccupiedSlaveLand } = require('../farm');
 const { recordOperation } = require('../stats');
@@ -228,7 +228,7 @@ export function parseTimeToMinutes(timeStr: string): number | null {
     return h * 60 + min;
 }
 
-export function inFriendQuietHours(now: Date = new Date()): boolean {
+export function inFriendQuietHours(now?: Date): boolean {
     const cfg: any = getFriendQuietHours();
     if (!cfg || !cfg.enabled) return false;
 
@@ -236,7 +236,9 @@ export function inFriendQuietHours(now: Date = new Date()): boolean {
     const end: number | null = parseTimeToMinutes(cfg.end);
     if (start === null || end === null) return false;
 
-    const cur: number = now.getHours() * 60 + now.getMinutes();
+    const cur: number = now instanceof Date
+        ? getSystemClockMinutes(now.getTime())
+        : getSystemClockMinutes();
     if (start === end) return true; // 起止相同视为全天静默
     if (start < end) return cur >= start && cur < end;
     return cur >= start || cur < end; // 跨天时段
@@ -409,13 +411,14 @@ export async function getFriendsList(forceSync: boolean = false): Promise<any[]>
  * 获取指定好友的农田详情 (进入-获取-离开)
  */
 export async function getFriendLandsDetail(friendGid: number): Promise<any> {
+    let entered = false;
     try {
         const enterReply: any = await enterFriendFarm(friendGid);
+        entered = true;
         const lands: any[] = enterReply.lands || [];
         const state: any = getUserState();
         const plantBlacklist: number[] = getPlantBlacklist(state.accountId);
         const analyzed: AnalyzeResult = analyzeFriendLands(lands, state.gid, '', { plantBlacklist });
-        await leaveFriendFarm(friendGid);
 
         const landsList: any[] = [];
         const nowSec: number = getServerTimeSec();
@@ -528,8 +531,8 @@ export async function getFriendLandsDetail(friendGid: number): Promise<any> {
             lands: landsList,
             summary: analyzed,
         };
-    } catch {
-        return { lands: [], summary: {} };
+    } finally {
+        if (entered) await leaveFriendFarm(friendGid);
     }
 }
 
