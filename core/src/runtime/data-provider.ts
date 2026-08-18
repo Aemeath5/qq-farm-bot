@@ -117,6 +117,12 @@ function createDataProvider(options: DataProviderOptions) {
         clearFriendsCache: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'clearFriendsCache'),
         getInteractRecords: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getInteractRecords'),
         getFriendLands: (accountRef: string, gid: number) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriendLands', gid),
+        getFriendInteractionItems: (accountRef: string) => (
+            callWorkerApi(resolveAccountRefId(accountRef), 'getFriendInteractionItems')
+        ),
+        useFriendInteractionItemBatch: (accountRef: string, gid: unknown, itemId: unknown, landIds: unknown) => (
+            callWorkerApi(resolveAccountRefId(accountRef), 'useFriendInteractionItemBatch', gid, itemId, landIds)
+        ),
         doFriendOp: (accountRef: string, gid: number, opType: string) => callWorkerApi(resolveAccountRefId(accountRef), 'doFriendOp', gid, opType),
         getBag: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getBag'),
         getBagSeeds: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getBagSeeds'),
@@ -141,8 +147,17 @@ function createDataProvider(options: DataProviderOptions) {
         continueQingMeiBrew: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'continueQingMeiBrew'),
         settleQingMeiBrew: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'settleQingMeiBrew'),
         claimQixiBridgeRewards: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'claimQixiBridgeRewards'),
-        giftQixiSachet: (accountRef: string, friendGid: unknown, count: unknown) => (
-            callWorkerApi(resolveAccountRefId(accountRef), 'giftQixiSachet', friendGid, count)
+        giftQixiSachet: (accountRef: string, friendGid: unknown, messageTextId: unknown = 15) => (
+            callWorkerApi(resolveAccountRefId(accountRef), 'giftQixiSachet', friendGid, messageTextId)
+        ),
+        getQixiDewTargets: (accountRef: string, hostGid: unknown) => (
+            callWorkerApi(resolveAccountRefId(accountRef), 'getQixiDewTargets', hostGid)
+        ),
+        useQixiDew: (accountRef: string, hostGid: unknown, landId: unknown) => (
+            callWorkerApi(resolveAccountRefId(accountRef), 'useQixiDew', hostGid, landId)
+        ),
+        useQixiDewBatch: (accountRef: string, hostGid: unknown, landIds: unknown) => (
+            callWorkerApi(resolveAccountRefId(accountRef), 'useQixiDewBatch', hostGid, landIds)
         ),
         getMallCatalog: (accountRef: string, slotType: unknown, subSlotType: unknown) => (
             callWorkerApi(resolveAccountRefId(accountRef), 'getMallCatalog', slotType, subSlotType)
