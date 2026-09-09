@@ -1,7 +1,7 @@
-import type { AccountConfig, AutomationConfig, BagSeedFallbackStrategy, FertilizerLandType, GlobalConfig, IntervalConfig, OfflineReminder, PlantingStrategy, QuietHoursConfig } from '../../types/config';
+import type { AccountConfig, AutomationConfig, BagSeedFallbackStrategy, FertilizerLandType, GlobalConfig, IntervalConfig, LoginSettings, OfflineReminder, PlantingStrategy, QuietHoursConfig } from '../../types/config';
 export {};
 
-const { DEFAULT_CLIENT_VERSION, DEFAULT_TIME_ZONE, normalizeTimeZone } = require('../../config/config');
+const { DEFAULT_TIME_ZONE, normalizeTimeZone, resolveClientVersion } = require('../../config/config');
 const { getDataFile, ensureDataDir } = require('../../config/runtime-paths');
 const { readJsonFile } = require('../../services/json-db');
 
@@ -15,7 +15,7 @@ const PUSHOO_CHANNELS: Set<string> = new Set([
     'webhook', 'qmsg', 'serverchan', 'pushplus', 'pushplushxtrip',
     'dingtalk', 'wecom', 'bark', 'gocqhttp', 'onebot', 'atri',
     'pushdeer', 'igot', 'telegram', 'feishu', 'ifttt', 'wecombot',
-    'discord', 'wxpusher',
+    'discord', 'wxpusher', 'meow',
 ]);
 
 const DEFAULT_FERTILIZER_LAND_TYPES: FertilizerLandType[] = ['purple-gold', 'gold', 'black', 'red', 'normal'];
@@ -23,14 +23,6 @@ const FERTILIZER_LAND_TYPE_SET: Set<string> = new Set(DEFAULT_FERTILIZER_LAND_TY
 const INTERVAL_MAX_SEC: number = 86400;
 const DEFAULT_KNOWN_FRIEND_GID_SYNC_COOLDOWN_SEC: number = 300;
 const DEFAULT_FRIENDS_LIST_CACHE_TTL_SEC: number = 60;
-const LEGACY_DEFAULT_CLIENT_VERSIONS: ReadonlySet<string> = new Set([
-    '1.13.2.8_20260723',
-    '1.13.2.9_20260723',
-]);
-function isManagedDefaultClientVersion(value: unknown): boolean {
-    const version = String(value || '').trim();
-    return version === DEFAULT_CLIENT_VERSION || LEGACY_DEFAULT_CLIENT_VERSIONS.has(version);
-}
 let systemConfigMigrated: boolean = false;
 let accountFallbackConfig: AccountConfig;
 
@@ -44,26 +36,43 @@ const DEFAULT_OFFLINE_REMINDER: OfflineReminder = {
     offlineDeleteSec: 0,
 };
 
+const DEFAULT_LOGIN_SETTINGS: LoginSettings = {
+    wechatQrLogin: true,
+    qqQrLogin: false,
+    napCatEndpoint: '',
+    napCatSignature: '',
+};
+
 const DEFAULT_ACCOUNT_CONFIG: AccountConfig = {
     automation: {
         farm: true,
         farm_push: true,
         land_upgrade: true,
         friend: true,
+        friend_auto_accept: true,
         friend_help_exp_limit: true,
         friend_steal: true,
         friend_help: true,
         friend_bad: true,
+        friend_help_protect_dog_ignore_exp_limit: true,
         task: true,
         fertilizer_gift: false,
         fertilizer_buy_organic: false,
         fertilizer_buy_normal: false,
+        mystery_shop_auto_buy: false,
+        mystery_shop_allow_gold: true,
+        mystery_shop_allow_coupon: false,
+        mystery_shop_allow_gold_bean: false,
+        mystery_shop_allow_diamond: false,
+        mystery_shop_arrival_notify: false,
+        mystery_shop_purchase_notify: false,
         sell: true,
         fertilizer: 'smart',
         fertilizer_multi_season: true,
         fertilizer_land_types: [...DEFAULT_FERTILIZER_LAND_TYPES],
         fertilizer_smart_seconds: 300,
         skip_own_weed_bug: true,
+        show_manual_fertilizer: true,
     },
     plantingStrategy: 'max_exp',
     preferredSeedId: 0,
@@ -71,6 +80,8 @@ const DEFAULT_ACCOUNT_CONFIG: AccountConfig = {
         farm: 2,
         farmMin: 20,
         farmMax: 25,
+        friendMin: 20,
+        friendMax: 25,
         helpMin: 20,
         helpMax: 25,
         stealMin: 20,
@@ -104,7 +115,13 @@ const DEFAULT_ACCOUNT_CONFIG: AccountConfig = {
     fertilizerBuyNormalThresholdHours: 10,
     fertilizerBuyCheckIntervalMinutes: 60,
     bagSeedPriority: [],
+    bagSeedLandTypes: {},
     bagSeedFallbackStrategy: 'level',
+    autoAcceptFriendMinLevel: 0,
+    autoAcceptRequireOwnLevel: false,
+    autoAcceptHarvestStealEnabled: true,
+    autoAcceptHarvestStealHarvest: 8,
+    autoAcceptHarvestStealSteal: 1,
 };
 
 const ALLOWED_AUTOMATION_KEYS: Set<string> = new Set(Object.keys(DEFAULT_ACCOUNT_CONFIG.automation));
@@ -135,6 +152,24 @@ function normalizeFriendsListCacheTtlSec(input: unknown, fallback: number = DEFA
     return Math.max(10, Math.min(INTERVAL_MAX_SEC, base));
 }
 
+function normalizeAutoAcceptFriendMinLevel(input: unknown, fallback: number = 0): number {
+    const value = Number.parseInt(input as string, 10);
+    const base = Number.isFinite(value) ? value : fallback;
+    return Math.max(0, Math.min(200, base));
+}
+
+function normalizeAutoAcceptHarvestStealHarvest(input: unknown, fallback: number = 8): number {
+    const value = Number.parseInt(input as string, 10);
+    const base = Number.isFinite(value) ? value : fallback;
+    return Math.max(0, Math.min(9999, base));
+}
+
+function normalizeAutoAcceptHarvestStealSteal(input: unknown, fallback: number = 1): number {
+    const value = Number.parseInt(input as string, 10);
+    const base = Number.isFinite(value) ? value : fallback;
+    return Math.max(1, Math.min(9999, base));
+}
+
 function normalizeBagSeedPriority(input: unknown): number[] {
     if (!Array.isArray(input)) return [];
     const normalized: number[] = [];
@@ -143,6 +178,29 @@ function normalizeBagSeedPriority(input: unknown): number[] {
         if (!Number.isFinite(value) || value <= 0) continue;
         if (normalized.includes(value)) continue;
         normalized.push(value);
+    }
+    return normalized;
+}
+
+/**
+ * seedId -> 允许的土地类型。缺 key、空数组、全类型三者等价于不限制，统一省略该 key。
+ */
+function normalizeBagSeedLandTypes(input: unknown): Record<string, FertilizerLandType[]> {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+    const normalized: Record<string, FertilizerLandType[]> = {};
+    for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+        const seedId = Number.parseInt(key, 10);
+        if (!Number.isFinite(seedId) || seedId <= 0) continue;
+        if (!Array.isArray(value)) continue;
+        const types: FertilizerLandType[] = [];
+        for (const item of value) {
+            const type = String(item || '').trim().toLowerCase();
+            if (!FERTILIZER_LAND_TYPE_SET.has(type)) continue;
+            if (types.includes(type as FertilizerLandType)) continue;
+            types.push(type as FertilizerLandType);
+        }
+        if (types.length === 0 || types.length === DEFAULT_FERTILIZER_LAND_TYPES.length) continue;
+        normalized[String(seedId)] = types;
     }
     return normalized;
 }
@@ -191,11 +249,18 @@ function normalizeIntervals(intervals: Partial<IntervalConfig> | undefined): Int
     let stealMax = toSec(src.stealMax, 10);
     if (stealMin > stealMax) [stealMin, stealMax] = [stealMax, stealMin];
 
+    // 新配置使用统一好友任务间隔；旧账号自动取帮助/偷菜两组间隔中较快的一组。
+    let friendMin = toSec(src.friendMin, Math.min(helpMin, stealMin));
+    let friendMax = toSec(src.friendMax, Math.min(helpMax, stealMax));
+    if (friendMin > friendMax) [friendMin, friendMax] = [friendMax, friendMin];
+
     return {
         ...src,
         farm,
         farmMin,
         farmMax,
+        friendMin,
+        friendMax,
         helpMin,
         helpMax,
         stealMin,
@@ -248,7 +313,15 @@ function cloneAccountConfig(base: Partial<AccountConfig> = DEFAULT_ACCOUNT_CONFI
         fertilizerBuyNormalThresholdHours: Math.max(0, Math.min(990, Number(base.fertilizerBuyNormalThresholdHours) || 0)),
         fertilizerBuyCheckIntervalMinutes: Math.max(1, Math.min(1440, Number(base.fertilizerBuyCheckIntervalMinutes) || 30)),
         bagSeedPriority: normalizeBagSeedPriority(base.bagSeedPriority),
+        bagSeedLandTypes: normalizeBagSeedLandTypes(base.bagSeedLandTypes),
         bagSeedFallbackStrategy: normalizeBagSeedFallbackStrategy(base.bagSeedFallbackStrategy),
+        autoAcceptFriendMinLevel: normalizeAutoAcceptFriendMinLevel(base.autoAcceptFriendMinLevel, DEFAULT_ACCOUNT_CONFIG.autoAcceptFriendMinLevel),
+        autoAcceptRequireOwnLevel: !!base.autoAcceptRequireOwnLevel,
+        autoAcceptHarvestStealEnabled: base.autoAcceptHarvestStealEnabled !== undefined
+            ? !!base.autoAcceptHarvestStealEnabled
+            : DEFAULT_ACCOUNT_CONFIG.autoAcceptHarvestStealEnabled,
+        autoAcceptHarvestStealHarvest: normalizeAutoAcceptHarvestStealHarvest(base.autoAcceptHarvestStealHarvest, DEFAULT_ACCOUNT_CONFIG.autoAcceptHarvestStealHarvest),
+        autoAcceptHarvestStealSteal: normalizeAutoAcceptHarvestStealSteal(base.autoAcceptHarvestStealSteal, DEFAULT_ACCOUNT_CONFIG.autoAcceptHarvestStealSteal),
     };
 }
 
@@ -364,8 +437,32 @@ function normalizeAccountConfig(input: unknown, fallback: AccountConfig = accoun
         cfg.bagSeedPriority = normalizeBagSeedPriority(src.bagSeedPriority);
     }
 
+    if (src.bagSeedLandTypes !== undefined && src.bagSeedLandTypes !== null) {
+        cfg.bagSeedLandTypes = normalizeBagSeedLandTypes(src.bagSeedLandTypes);
+    }
+
     if (src.bagSeedFallbackStrategy !== undefined && src.bagSeedFallbackStrategy !== null) {
         cfg.bagSeedFallbackStrategy = normalizeBagSeedFallbackStrategy(src.bagSeedFallbackStrategy, cfg.bagSeedFallbackStrategy);
+    }
+
+    if (src.autoAcceptFriendMinLevel !== undefined && src.autoAcceptFriendMinLevel !== null) {
+        cfg.autoAcceptFriendMinLevel = normalizeAutoAcceptFriendMinLevel(src.autoAcceptFriendMinLevel, cfg.autoAcceptFriendMinLevel);
+    }
+
+    if (src.autoAcceptRequireOwnLevel !== undefined && src.autoAcceptRequireOwnLevel !== null) {
+        cfg.autoAcceptRequireOwnLevel = !!src.autoAcceptRequireOwnLevel;
+    }
+
+    if (src.autoAcceptHarvestStealEnabled !== undefined && src.autoAcceptHarvestStealEnabled !== null) {
+        cfg.autoAcceptHarvestStealEnabled = !!src.autoAcceptHarvestStealEnabled;
+    }
+
+    if (src.autoAcceptHarvestStealHarvest !== undefined && src.autoAcceptHarvestStealHarvest !== null) {
+        cfg.autoAcceptHarvestStealHarvest = normalizeAutoAcceptHarvestStealHarvest(src.autoAcceptHarvestStealHarvest, cfg.autoAcceptHarvestStealHarvest);
+    }
+
+    if (src.autoAcceptHarvestStealSteal !== undefined && src.autoAcceptHarvestStealSteal !== null) {
+        cfg.autoAcceptHarvestStealSteal = normalizeAutoAcceptHarvestStealSteal(src.autoAcceptHarvestStealSteal, cfg.autoAcceptHarvestStealSteal);
     }
 
     return cfg;
@@ -389,6 +486,7 @@ const globalConfig: GlobalConfig = {
     ui: {
         theme: 'light',
     },
+    loginSettings: { ...DEFAULT_LOGIN_SETTINGS },
     offlineReminder: { ...DEFAULT_OFFLINE_REMINDER },
     systemConfig: null,
 };
@@ -429,20 +527,39 @@ function loadGlobalConfig(): void {
                 globalConfig.offlineReminder = data.offlineReminder;
             }
 
+            if (data.loginSettings && typeof data.loginSettings === 'object') {
+                globalConfig.loginSettings = {
+                    wechatQrLogin: typeof data.loginSettings.wechatQrLogin === 'boolean'
+                        ? data.loginSettings.wechatQrLogin
+                        : DEFAULT_LOGIN_SETTINGS.wechatQrLogin,
+                    qqQrLogin: typeof data.loginSettings.qqQrLogin === 'boolean'
+                        ? data.loginSettings.qqQrLogin
+                        : DEFAULT_LOGIN_SETTINGS.qqQrLogin,
+                    napCatEndpoint: typeof data.loginSettings.napCatEndpoint === 'string'
+                        ? data.loginSettings.napCatEndpoint.trim()
+                        : DEFAULT_LOGIN_SETTINGS.napCatEndpoint,
+                    napCatSignature: typeof data.loginSettings.napCatSignature === 'string'
+                        ? data.loginSettings.napCatSignature.trim()
+                        : DEFAULT_LOGIN_SETTINGS.napCatSignature,
+                };
+            }
+
             if (data.systemConfig && typeof data.systemConfig === 'object') {
                 const srcDevice = (data.systemConfig.deviceInfo && typeof data.systemConfig.deviceInfo === 'object')
                     ? data.systemConfig.deviceInfo : {};
                 const deviceOs = String(srcDevice.os || data.systemConfig.os || 'Windows').trim();
                 const savedTopVersion = String(data.systemConfig.clientVersion || '').trim();
                 const savedDeviceVersion = String(srcDevice.clientVersion || '').trim();
-                const customDeviceVersion = savedDeviceVersion && !isManagedDefaultClientVersion(savedDeviceVersion)
-                    ? savedDeviceVersion : '';
-                const customTopVersion = savedTopVersion && !isManagedDefaultClientVersion(savedTopVersion)
-                    ? savedTopVersion : '';
-                const deviceClientVersion = customDeviceVersion || customTopVersion || DEFAULT_CLIENT_VERSION;
+                const savedVersion = savedDeviceVersion || savedTopVersion;
+                const savedVersionUpdatedAt = Number(data.systemConfig.clientVersionUpdatedAt);
+                const {
+                    clientVersion: deviceClientVersion,
+                    clientVersionUpdatedAt: deviceClientVersionUpdatedAt,
+                } = resolveClientVersion(savedVersion, savedVersionUpdatedAt);
                 const normalizedSystemConfig = {
                     serverUrl: String(data.systemConfig.serverUrl || '').trim(),
                     clientVersion: deviceClientVersion,
+                    clientVersionUpdatedAt: deviceClientVersionUpdatedAt,
                     platform: String(data.systemConfig.platform || 'qq').trim(),
                     os: deviceOs,
                     timeZone: normalizeTimeZone(data.systemConfig.timeZone || DEFAULT_TIME_ZONE),
@@ -458,6 +575,7 @@ function loadGlobalConfig(): void {
                 };
                 systemConfigMigrated = savedTopVersion !== deviceClientVersion
                     || savedDeviceVersion !== deviceClientVersion
+                    || Number(data.systemConfig.clientVersionUpdatedAt) !== deviceClientVersionUpdatedAt
                     || data.systemConfig.timeZone !== normalizedSystemConfig.timeZone;
                 globalConfig.systemConfig = normalizedSystemConfig;
             }
@@ -482,8 +600,8 @@ module.exports = {
     DEFAULT_KNOWN_FRIEND_GID_SYNC_COOLDOWN_SEC,
     DEFAULT_FRIENDS_LIST_CACHE_TTL_SEC,
     DEFAULT_OFFLINE_REMINDER,
+    DEFAULT_LOGIN_SETTINGS,
     DEFAULT_ACCOUNT_CONFIG,
-    LEGACY_DEFAULT_CLIENT_VERSIONS,
     ALLOWED_AUTOMATION_KEYS,
     // Mutable shared state (by reference)
     globalConfig,
@@ -496,13 +614,16 @@ module.exports = {
     normalizeKnownFriendGidSyncCooldownSec,
     normalizeFriendsListCacheTtlSec,
     normalizeBagSeedPriority,
+    normalizeBagSeedLandTypes,
     normalizeBagSeedFallbackStrategy,
     normalizeFertilizerLandTypes,
     normalizeTimeString,
     normalizeIntervals,
+    normalizeAutoAcceptFriendMinLevel,
+    normalizeAutoAcceptHarvestStealHarvest,
+    normalizeAutoAcceptHarvestStealSteal,
     normalizeAccountConfig,
     cloneAccountConfig,
-    isManagedDefaultClientVersion,
     resolveAccountId,
     loadGlobalConfig,
 };

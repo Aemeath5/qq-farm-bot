@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { NButton, NCheckbox, NCheckboxGroup, NTab, NTabs, NTimePicker } from 'naive-ui'
+import { NButton } from 'naive-ui/es/button'
+import { NTab, NTabs } from 'naive-ui/es/tabs'
+import { NTimePicker } from 'naive-ui/es/time-picker'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import api from '@/api'
+import api, { getApiErrorMessage } from '@/api'
 import AccountModal from '@/components/AccountModal.vue'
 import ConfirmModal from '@/components/ConfirmModal.vue'
+import AutomationSettingsForm from '@/components/settings/AutomationSettingsForm.vue'
+import BagSeedPriorityItem from '@/components/settings/BagSeedPriorityItem.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
@@ -30,8 +34,6 @@ const initialTab = settingsTabKeys.includes(queryTab as SettingsTab)
   ? queryTab as SettingsTab
   : storedTab === 'user' ? 'system' : (storedTab as SettingsTab) || 'account'
 const activeTab = ref<SettingsTab>(initialTab)
-const chevronUpIconClass = 'i-carbon-chevron-up'
-const chevronDownIconClass = 'i-carbon-chevron-down'
 
 watch(activeTab, (newTab) => {
   localStorage.setItem('settings-active-tab', newTab)
@@ -249,11 +251,12 @@ const localStrategySettings = ref({
   plantingStrategy: 'max_exp',
   preferredSeedId: 0,
   bagSeedPriority: [] as number[],
+  bagSeedLandTypes: {} as Record<string, string[]>,
   bagSeedFallbackStrategy: 'level',
   stealDelaySeconds: 0,
   plantOrderRandom: false,
   plantDelaySeconds: 0,
-  intervals: { farmMin: 2, farmMax: 5, helpMin: 10, helpMax: 15, stealMin: 10, stealMax: 15 },
+  intervals: { farmMin: 2, farmMax: 5, friendMin: 10, friendMax: 15 },
   friendQuietHours: { enabled: false, start: '23:00', end: '07:00', continueFarm: true },
 })
 
@@ -282,6 +285,7 @@ interface BagSeedItem {
   count: number
   requiredLevel: number
   plantSize: number
+  image?: string
 }
 
 const bagSeeds = ref<BagSeedItem[]>([])
@@ -341,6 +345,42 @@ const sortedBagSeeds = computed(() => {
   return normalizeVisibleBagSeedOrder()
     .map(seedId => itemMap.get(seedId))
     .filter((seed): seed is BagSeedItem => !!seed)
+})
+
+function setBagSeedLandTypes(seedId: number, types: string[]) {
+  const next = { ...localStrategySettings.value.bagSeedLandTypes }
+  // 按固定顺序收敛；不勾或勾满都等价于不限制，直接去掉该 seedId。
+  const normalized = fertilizerLandTypeOptions
+    .map(option => option.value)
+    .filter(value => types.includes(value))
+  if (normalized.length === 0 || normalized.length === fertilizerLandTypeOptions.length)
+    delete next[String(seedId)]
+  else
+    next[String(seedId)] = normalized
+  localStrategySettings.value.bagSeedLandTypes = next
+}
+
+// 设置页只列背包里现有的种子，缺货种子的限制仍保留，这里显式列出以免出现看不见的规则。
+const orphanRestrictedSeeds = computed(() => {
+  // 背包列表未加载时无法判断谁真的缺货，此时不显示，避免误清除已有限制。
+  if (bagSeeds.value.length === 0)
+    return []
+  const visible = new Set(visibleBagSeedIds.value)
+  return Object.entries(localStrategySettings.value.bagSeedLandTypes)
+    .map(([seedId, types]) => ({ seedId: Number(seedId), types: types || [] }))
+    .filter(item => item.seedId > 0 && item.types.length > 0 && !visible.has(item.seedId))
+    .sort((a, b) => a.seedId - b.seedId)
+    .map((item) => {
+      const known = seedOptions.value.find(seed => seed.seedId === item.seedId)
+      const labels = fertilizerLandTypeOptions
+        .filter(option => item.types.includes(option.value))
+        .map(option => option.label)
+      return {
+        seedId: item.seedId,
+        name: known ? known.name : `种子 #${item.seedId}`,
+        scope: `仅种 ${labels.join('、')}`,
+      }
+    })
 })
 
 function isAccountConnected(accountId: string) {
@@ -407,10 +447,16 @@ async function fetchBagSeeds(accountId = currentAccountId.value) {
     if (res.data.ok) {
       bagSeeds.value = (res.data.data || []).filter((seed: BagSeedItem) => seed.plantSize >= 1)
     }
+    else {
+      bagSeeds.value = []
+      bagSeedsError.value = getApiErrorMessage(res.data, '加载失败')
+      bagSeedsLoadedAccountId = accountId
+    }
     if (accountId === currentAccountId.value)
       bagSeedsLoadedAccountId = accountId
   }
   catch (e: any) {
+    e.message = getApiErrorMessage(e, '加载失败')
     if (requestRevision === bagSeedsRequestRevision && accountId === currentAccountId.value) {
       bagSeedsError.value = e.message || '加载失败'
       bagSeedsLoadedAccountId = accountId
@@ -672,6 +718,7 @@ function syncLocalStrategySettings() {
       plantingStrategy: settings.value.plantingStrategy,
       preferredSeedId: settings.value.preferredSeedId,
       bagSeedPriority: settings.value.bagSeedPriority ?? [],
+      bagSeedLandTypes: settings.value.bagSeedLandTypes ?? {},
       bagSeedFallbackStrategy: settings.value.bagSeedFallbackStrategy ?? 'level',
       stealDelaySeconds: settings.value.stealDelaySeconds ?? 0,
       plantOrderRandom: !!settings.value.plantOrderRandom,
@@ -792,26 +839,41 @@ const localAutomationSettings = ref({
     task: false,
     sell: true,
     friend: false,
+    friend_auto_accept: true,
     farm_push: false,
     land_upgrade: true,
     friend_steal: false,
     friend_help: false,
     friend_bad: true,
     friend_help_exp_limit: false,
+    friend_help_protect_dog_ignore_exp_limit: true,
     fertilizer_gift: false,
     fertilizer_buy_organic: false,
     fertilizer_buy_normal: false,
+    mystery_shop_auto_buy: false,
+    mystery_shop_allow_gold: true,
+    mystery_shop_allow_coupon: false,
+    mystery_shop_allow_gold_bean: false,
+    mystery_shop_allow_diamond: false,
+    mystery_shop_arrival_notify: false,
+    mystery_shop_purchase_notify: false,
     fertilizer: 'normal',
     skip_own_weed_bug: false,
     fertilizer_multi_season: false,
     fertilizer_land_types: [...allFertilizerLandTypes],
     fertilizer_smart_seconds: 300,
+    show_manual_fertilizer: true,
   },
   fertilizerBuyOrganicCount: 10,
   fertilizerBuyOrganicThresholdHours: 10,
   fertilizerBuyNormalCount: 10,
   fertilizerBuyNormalThresholdHours: 10,
   fertilizerBuyCheckIntervalMinutes: 30,
+  autoAcceptFriendMinLevel: 0,
+  autoAcceptRequireOwnLevel: false,
+  autoAcceptHarvestStealEnabled: true,
+  autoAcceptHarvestStealHarvest: 8,
+  autoAcceptHarvestStealSteal: 1,
 })
 
 const fertilizerOptions = [
@@ -830,20 +892,30 @@ function syncLocalAutomationSettings() {
         task: false,
         sell: false,
         friend: false,
+        friend_auto_accept: true,
         farm_push: false,
         land_upgrade: false,
         friend_steal: false,
         friend_help: false,
         friend_bad: false,
         friend_help_exp_limit: false,
+        friend_help_protect_dog_ignore_exp_limit: true,
         fertilizer_gift: false,
         fertilizer_buy_organic: false,
         fertilizer_buy_normal: false,
+        mystery_shop_auto_buy: false,
+        mystery_shop_allow_gold: true,
+        mystery_shop_allow_coupon: false,
+        mystery_shop_allow_gold_bean: false,
+        mystery_shop_allow_diamond: false,
+        mystery_shop_arrival_notify: false,
+        mystery_shop_purchase_notify: false,
         fertilizer: 'none',
         skip_own_weed_bug: false,
         fertilizer_multi_season: false,
         fertilizer_land_types: [...allFertilizerLandTypes],
         fertilizer_smart_seconds: 300,
+        show_manual_fertilizer: true,
       }
     }
     else {
@@ -852,20 +924,30 @@ function syncLocalAutomationSettings() {
         task: false,
         sell: false,
         friend: false,
+        friend_auto_accept: true,
         farm_push: false,
         land_upgrade: false,
         friend_steal: false,
         friend_help: false,
         friend_bad: false,
         friend_help_exp_limit: false,
+        friend_help_protect_dog_ignore_exp_limit: true,
         fertilizer_gift: false,
         fertilizer_buy_organic: false,
         fertilizer_buy_normal: false,
+        mystery_shop_auto_buy: false,
+        mystery_shop_allow_gold: true,
+        mystery_shop_allow_coupon: false,
+        mystery_shop_allow_gold_bean: false,
+        mystery_shop_allow_diamond: false,
+        mystery_shop_arrival_notify: false,
+        mystery_shop_purchase_notify: false,
         fertilizer: 'none',
         skip_own_weed_bug: false,
         fertilizer_multi_season: false,
         fertilizer_land_types: [...allFertilizerLandTypes],
         fertilizer_smart_seconds: 300,
+        show_manual_fertilizer: true,
       }
       localAutomationSettings.value.automation = {
         ...defaults,
@@ -876,11 +958,19 @@ function syncLocalAutomationSettings() {
     if (localAutomationSettings.value.automation.fertilizer_smart_seconds === undefined) {
       localAutomationSettings.value.automation.fertilizer_smart_seconds = 300
     }
+    if (localAutomationSettings.value.automation.show_manual_fertilizer === undefined) {
+      localAutomationSettings.value.automation.show_manual_fertilizer = true
+    }
     localAutomationSettings.value.fertilizerBuyOrganicCount = settings.value.fertilizerBuyOrganicCount ?? 10
     localAutomationSettings.value.fertilizerBuyOrganicThresholdHours = settings.value.fertilizerBuyOrganicThresholdHours ?? 10
     localAutomationSettings.value.fertilizerBuyNormalCount = settings.value.fertilizerBuyNormalCount ?? 10
     localAutomationSettings.value.fertilizerBuyNormalThresholdHours = settings.value.fertilizerBuyNormalThresholdHours ?? 10
     localAutomationSettings.value.fertilizerBuyCheckIntervalMinutes = settings.value.fertilizerBuyCheckIntervalMinutes ?? 30
+    localAutomationSettings.value.autoAcceptFriendMinLevel = settings.value.autoAcceptFriendMinLevel ?? 0
+    localAutomationSettings.value.autoAcceptRequireOwnLevel = settings.value.autoAcceptRequireOwnLevel ?? false
+    localAutomationSettings.value.autoAcceptHarvestStealEnabled = settings.value.autoAcceptHarvestStealEnabled ?? true
+    localAutomationSettings.value.autoAcceptHarvestStealHarvest = settings.value.autoAcceptHarvestStealHarvest ?? 8
+    localAutomationSettings.value.autoAcceptHarvestStealSteal = settings.value.autoAcceptHarvestStealSteal ?? 1
   }
 }
 
@@ -977,6 +1067,7 @@ const channelOptions = [
   { label: '企业微信群机器人', value: 'wecombot' },
   { label: 'Discord', value: 'discord' },
   { label: 'WxPusher', value: 'wxpusher' },
+  { label: 'MeoW', value: 'meow' },
 ]
 
 const CHANNEL_DOCS: Record<string, string> = {
@@ -999,15 +1090,21 @@ const CHANNEL_DOCS: Record<string, string> = {
   ifttt: 'https://ifttt.com/maker_webhooks',
   discord: 'https://discord.com/developers/docs/resources/webhook#execute-webhook',
   wxpusher: 'https://wxpusher.zjiecode.com/docs/#/',
+  meow: 'https://www.chuckfang.com/MeoW/api_doc.html',
 }
 
 const offlineChannel = computed(() => String(localOffline.value.channel || '').trim().toLowerCase())
 const isDingTalkChannel = computed(() => offlineChannel.value === 'dingtalk')
+const isMeowChannel = computed(() => offlineChannel.value === 'meow')
 const offlineChannelUsesEndpoint = computed(() => offlineChannel.value === 'webhook' || isDingTalkChannel.value)
 const offlineEndpointLabel = computed(() => isDingTalkChannel.value ? 'Webhook 地址' : '接口地址')
 const offlineEndpointPlaceholder = computed(() => isDingTalkChannel.value
   ? '从钉钉群机器人设置页复制完整 Webhook'
   : '接收消息的接口地址')
+const offlineTokenLabel = computed(() => isMeowChannel.value ? '昵称' : 'Token')
+const offlineTokenPlaceholder = computed(() => isMeowChannel.value
+  ? 'MeoW 注册昵称'
+  : '接收端 token')
 const currentChannelDocUrl = computed(() => CHANNEL_DOCS[offlineChannel.value] || '')
 
 function openChannelDocs() {
@@ -1145,11 +1242,11 @@ async function handleTestOffline() {
       showAlert('测试消息发送成功', 'primary')
     }
     else {
-      showAlert(`测试失败: ${data?.error || '未知错误'}`, 'danger')
+      showAlert(`测试失败: ${getApiErrorMessage(data, '未知错误')}`, 'danger')
     }
   }
   catch (e: any) {
-    const msg = e?.response?.data?.error || e?.message || '请求失败'
+    const msg = getApiErrorMessage(e, '请求失败')
     showAlert(`测试失败: ${msg}`, 'danger')
   }
   finally {
@@ -1159,6 +1256,7 @@ async function handleTestOffline() {
 
 const systemConfigSaving = ref(false)
 const systemConfigLoading = ref(false)
+const loginSettingsSaving = ref(false)
 
 const defaultDeviceInfo = {
   os: 'Windows',
@@ -1186,6 +1284,12 @@ const defaultSystemConfig = ref({
   timeZone: 'Asia/Shanghai',
   deviceInfo: { ...defaultDeviceInfo },
 })
+const localLoginSettings = ref({
+  wechatQrLogin: true,
+  qqQrLogin: false,
+  napCatEndpoint: '',
+  napCatSignature: '',
+})
 const devicePresets = ref<any[]>([])
 const selectedPresetId = ref('')
 const timeZoneOptions = ref([
@@ -1209,6 +1313,15 @@ function normalizeSystemConfig(source: any, fallback: any) {
     os: source?.os || 'Windows',
     timeZone: source?.timeZone || fallback.timeZone || 'Asia/Shanghai',
     deviceInfo: source?.deviceInfo ? { ...fallback.deviceInfo, ...source.deviceInfo } : { ...fallback.deviceInfo },
+  }
+}
+
+function normalizeLoginSettings(source: any) {
+  return {
+    wechatQrLogin: typeof source?.wechatQrLogin === 'boolean' ? source.wechatQrLogin : true,
+    qqQrLogin: typeof source?.qqQrLogin === 'boolean' ? source.qqQrLogin : false,
+    napCatEndpoint: typeof source?.napCatEndpoint === 'string' ? source.napCatEndpoint.trim() : '',
+    napCatSignature: typeof source?.napCatSignature === 'string' ? source.napCatSignature.trim() : '',
   }
 }
 
@@ -1250,6 +1363,7 @@ async function loadSystemConfig() {
       }
       defaultSystemConfig.value = normalizeSystemConfig(data.data.default, defaultSystemConfig.value)
       localSystemConfig.value = normalizeSystemConfig(data.data.saved || data.data.default, defaultSystemConfig.value)
+      localLoginSettings.value = normalizeLoginSettings(data.data.loginSettings)
     }
   }
   catch (e) {
@@ -1260,16 +1374,38 @@ async function loadSystemConfig() {
   }
 }
 
+async function handleSaveLoginSettings() {
+  if (localLoginSettings.value.qqQrLogin
+    && (!localLoginSettings.value.napCatEndpoint.trim() || !localLoginSettings.value.napCatSignature.trim())) {
+    showAlert('开启 QQ 扫码登录前，请配置 NapCat 接口地址和接口签名', 'danger')
+    return
+  }
+  loginSettingsSaving.value = true
+  try {
+    const { data } = await api.post('/api/settings/login-config', localLoginSettings.value)
+    if (data?.ok) {
+      localLoginSettings.value = normalizeLoginSettings(data.data)
+    }
+    showAlert(data?.ok ? '登录设置已保存' : getApiErrorMessage(data, '保存失败'), data?.ok ? 'primary' : 'danger')
+  }
+  catch (e: any) {
+    showAlert(`保存失败: ${getApiErrorMessage(e, '未知错误')}`, 'danger')
+  }
+  finally {
+    loginSettingsSaving.value = false
+  }
+}
+
 async function handleSaveSystemConfig() {
   systemConfigSaving.value = true
   try {
     localSystemConfig.value.clientVersion = localSystemConfig.value.deviceInfo.clientVersion
     localSystemConfig.value.os = localSystemConfig.value.deviceInfo.os
     const { data } = await api.post('/api/settings/system-config', localSystemConfig.value)
-    showAlert(data?.ok ? '系统配置已保存并立即生效' : data?.error || '保存失败', data?.ok ? 'primary' : 'danger')
+    showAlert(data?.ok ? '系统配置已保存并立即生效' : getApiErrorMessage(data, '保存失败'), data?.ok ? 'primary' : 'danger')
   }
   catch (e: any) {
-    showAlert(`保存失败: ${e.message || '未知错误'}`, 'danger')
+    showAlert(`保存失败: ${getApiErrorMessage(e, '未知错误')}`, 'danger')
   }
   finally {
     systemConfigSaving.value = false
@@ -1286,11 +1422,11 @@ async function handleResetSystemConfig() {
       showAlert('系统配置已重置为默认值', 'primary')
     }
     else {
-      showAlert(data?.error || '重置失败', 'danger')
+      showAlert(getApiErrorMessage(data, '重置失败'), 'danger')
     }
   }
   catch (e: any) {
-    showAlert(`重置失败: ${e.message || '未知错误'}`, 'danger')
+    showAlert(`重置失败: ${getApiErrorMessage(e, '未知错误')}`, 'danger')
   }
   finally {
     systemConfigSaving.value = false
@@ -1568,6 +1704,9 @@ async function handleResetSystemConfig() {
                     <p class="mt-1 text-xs text-amber-700/90 dark:text-amber-300/90">
                       先按下方顺序消耗背包中的 1x1 / 2x2 种子；背包种子不足时，再按“第二优先策略”补种。切换第二优先策略或重置时会据此重新排序。
                     </p>
+                    <p class="mt-1 text-xs text-amber-700/90 dark:text-amber-300/90">
+                      配了土地限制的种子会先占用它能种的地块，再由不限制的种子使用剩余空地。
+                    </p>
                   </div>
                   <NButton
                     size="tiny"
@@ -1588,57 +1727,47 @@ async function handleResetSystemConfig() {
                   背包中暂无 1x1 / 2x2 种子
                 </div>
                 <div v-else class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                  <div
+                  <BagSeedPriorityItem
                     v-for="(seed, index) in sortedBagSeeds"
                     :key="seed.seedId"
-                    class="min-h-18 flex items-center gap-2 border cartoon-card border-amber-200 rounded-xl bg-white px-3 py-2.5 dark:border-amber-700/50 dark:bg-gray-800"
-                    :class="{ 'opacity-60 ring-2 ring-amber-400': draggingBagSeedId === seed.seedId }"
-                    draggable="true"
-                    @dragstart="startBagSeedDrag(seed.seedId, $event)"
-                    @dragend="endBagSeedDrag"
-                    @dragover.prevent="dragOverBagSeed(seed.seedId, $event)"
+                    :seed="seed"
+                    :index="index"
+                    :land-types="localStrategySettings.bagSeedLandTypes[String(seed.seedId)]"
+                    :land-type-options="fertilizerLandTypeOptions"
+                    :dragging="draggingBagSeedId === seed.seedId"
+                    :can-move-up="index > 0"
+                    :can-move-down="index < sortedBagSeeds.length - 1"
+                    @move-up="moveBagSeedUp(seed.seedId)"
+                    @move-down="moveBagSeedDown(seed.seedId)"
+                    @update:land-types="setBagSeedLandTypes(seed.seedId, $event)"
+                    @drag-start="startBagSeedDrag(seed.seedId, $event)"
+                    @drag-end="endBagSeedDrag"
+                    @drag-over="dragOverBagSeed(seed.seedId, $event)"
                     @drop="dropBagSeed(seed.seedId, $event)"
-                  >
-                    <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-amber-100 text-xs text-amber-700 font-bold dark:bg-amber-900/50 dark:text-amber-300">
-                      {{ index + 1 }}
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <div class="flex items-center gap-1.5">
-                        <div class="truncate text-sm text-gray-800 font-semibold dark:text-gray-200">
-                          {{ seed.name }}
-                        </div>
-                        <span class="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 font-semibold dark:bg-amber-900/50 dark:text-amber-300">
-                          {{ seed.plantSize }}x{{ seed.plantSize }}
-                        </span>
-                      </div>
-                      <div class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                        库存 {{ seed.count }} · {{ seed.requiredLevel }} 级 · ID {{ seed.seedId }}
-                      </div>
-                    </div>
-                    <div class="flex shrink-0 flex-col gap-2">
-                      <NButton
-                        quaternary
-                        circle
-                        size="tiny"
-                        :disabled="index === 0"
-                        title="上移"
-                        aria-label="上移"
-                        @click="moveBagSeedUp(seed.seedId)"
-                      >
-                        <span :class="chevronUpIconClass" />
-                      </NButton>
-                      <NButton
-                        quaternary
-                        circle
-                        size="tiny"
-                        :disabled="index === sortedBagSeeds.length - 1"
-                        title="下移"
-                        aria-label="下移"
-                        @click="moveBagSeedDown(seed.seedId)"
-                      >
-                        <span :class="chevronDownIconClass" />
-                      </NButton>
-                    </div>
+                  />
+                </div>
+                <div v-if="orphanRestrictedSeeds.length > 0" class="border-t border-amber-200 pt-2 dark:border-amber-800/50">
+                  <div class="text-xs text-amber-800 dark:text-amber-300">
+                    未持有但已配限制
+                  </div>
+                  <p class="mt-1 text-[11px] text-amber-700/80 dark:text-amber-300/80">
+                    这些种子当前不在背包中，限制已保留，重新入库后仍生效。
+                  </p>
+                  <div class="mt-2 flex flex-wrap gap-1.5">
+                    <span
+                      v-for="item in orphanRestrictedSeeds"
+                      :key="item.seedId"
+                      class="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-1 text-[11px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
+                    >
+                      {{ item.name }} · {{ item.scope }}
+                      <button
+                        type="button"
+                        class="i-carbon-close text-amber-600 hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100"
+                        :title="`清除 ${item.name} 的土地限制`"
+                        :aria-label="`清除 ${item.name} 的土地限制`"
+                        @click="setBagSeedLandTypes(item.seedId, [])"
+                      />
+                    </span>
                   </div>
                 </div>
               </div>
@@ -1661,29 +1790,14 @@ async function handleResetSystemConfig() {
 
             <div class="grid grid-cols-2 gap-3 md:grid-cols-2">
               <BaseInput
-                v-model.number="localStrategySettings.intervals.helpMin"
-                label="帮助巡查最小 (秒)"
+                v-model.number="localStrategySettings.intervals.friendMin"
+                label="好友任务最小 (秒)"
                 type="number"
                 min="1"
               />
               <BaseInput
-                v-model.number="localStrategySettings.intervals.helpMax"
-                label="帮助巡查最大 (秒)"
-                type="number"
-                min="1"
-              />
-            </div>
-
-            <div class="grid grid-cols-2 gap-3 md:grid-cols-2">
-              <BaseInput
-                v-model.number="localStrategySettings.intervals.stealMin"
-                label="偷菜巡查最小 (秒)"
-                type="number"
-                min="1"
-              />
-              <BaseInput
-                v-model.number="localStrategySettings.intervals.stealMax"
-                label="偷菜巡查最大 (秒)"
+                v-model.number="localStrategySettings.intervals.friendMax"
+                label="好友任务最大 (秒)"
                 type="number"
                 min="1"
               />
@@ -1780,144 +1894,14 @@ async function handleResetSystemConfig() {
             <p>{{ currentAccountId ? '账号设置加载失败，请切换账号或刷新页面重试' : '请先选择账号' }}</p>
           </div>
 
-          <div v-else class="space-y-4">
-            <div class="grid grid-cols-2 gap-3 md:grid-cols-3">
-              <BaseSwitch v-model="localAutomationSettings.automation.farm" label="自动种植收获" />
-              <BaseSwitch v-model="localAutomationSettings.automation.task" label="自动做任务" />
-              <BaseSwitch v-model="localAutomationSettings.automation.sell" label="自动卖果实" />
-              <BaseSwitch v-model="localAutomationSettings.automation.friend" label="自动好友互动" />
-              <BaseSwitch v-model="localAutomationSettings.automation.farm_push" label="推送触发巡田" />
-              <BaseSwitch v-model="localAutomationSettings.automation.land_upgrade" label="自动升级土地" />
-              <BaseSwitch v-model="localAutomationSettings.automation.fertilizer_gift" label="自动填充化肥" />
-              <BaseSwitch v-model="localAutomationSettings.automation.fertilizer_buy_organic" label="自动购买有机化肥" />
-              <BaseSwitch v-model="localAutomationSettings.automation.fertilizer_buy_normal" label="自动购买无机化肥" />
-              <BaseSwitch v-model="localAutomationSettings.automation.skip_own_weed_bug" label="巡田时跳过一键务农" />
-            </div>
-
-            <div v-if="localAutomationSettings.automation.fertilizer_buy_organic || localAutomationSettings.automation.fertilizer_buy_normal" class="rounded bg-green-50 p-3 text-sm space-y-3 dark:bg-green-900/20">
-              <div v-if="localAutomationSettings.automation.fertilizer_buy_organic" class="space-y-2">
-                <div class="text-green-700 font-medium dark:text-green-400">
-                  有机化肥设置
-                </div>
-                <div class="flex flex-wrap gap-4">
-                  <BaseInput
-                    v-model.number="localAutomationSettings.fertilizerBuyOrganicCount"
-                    label="购买数量"
-                    type="number"
-                    min="1"
-                    max="10000"
-                  />
-                  <BaseInput
-                    v-model.number="localAutomationSettings.fertilizerBuyOrganicThresholdHours"
-                    label="触发阈值 (小时)"
-                    type="number"
-                    min="1"
-                    max="990"
-                  />
-                </div>
-              </div>
-              <div v-if="localAutomationSettings.automation.fertilizer_buy_normal" class="space-y-2">
-                <div class="text-green-700 font-medium dark:text-green-400">
-                  无机化肥设置
-                </div>
-                <div class="flex flex-wrap gap-4">
-                  <BaseInput
-                    v-model.number="localAutomationSettings.fertilizerBuyNormalCount"
-                    label="购买数量"
-                    type="number"
-                    min="1"
-                    max="10000"
-                  />
-                  <BaseInput
-                    v-model.number="localAutomationSettings.fertilizerBuyNormalThresholdHours"
-                    label="触发阈值 (小时)"
-                    type="number"
-                    min="1"
-                    max="990"
-                  />
-                </div>
-              </div>
-              <div class="flex flex-wrap gap-4">
-                <BaseInput
-                  v-model.number="localAutomationSettings.fertilizerBuyCheckIntervalMinutes"
-                  label="检测间隔 (分钟)"
-                  type="number"
-                  min="1"
-                  max="1440"
-                />
-              </div>
-              <p class="text-xs text-gray-500 dark:text-gray-400">
-                系统会按照设定的检测间隔定时检测化肥容器剩余量，当低于触发阈值时自动购买。保存设置后会立即检测一次。同时开启两种化肥购买时，优先购买有机化肥。
-              </p>
-            </div>
-
-            <div v-if="localAutomationSettings.automation.friend" class="flex flex-wrap gap-4 rounded bg-blue-50 p-3 text-sm dark:bg-blue-900/20">
-              <BaseSwitch v-model="localAutomationSettings.automation.friend_steal" label="自动偷菜" />
-              <BaseSwitch v-model="localAutomationSettings.automation.friend_help" label="自动帮忙" />
-              <BaseSwitch v-model="localAutomationSettings.automation.friend_bad" label="自动捣乱" />
-              <BaseSwitch v-model="localAutomationSettings.automation.friend_help_exp_limit" label="经验满不帮忙" />
-            </div>
-
-            <div class="space-y-3">
-              <div class="border border-amber-200 rounded bg-amber-50/60 p-3 dark:border-amber-800/60 dark:bg-amber-900/10">
-                <div class="mb-2 text-sm text-amber-800 font-medium dark:text-amber-300">
-                  施肥范围
-                </div>
-                <NCheckboxGroup v-model:value="localAutomationSettings.automation.fertilizer_land_types">
-                  <div class="grid grid-cols-2 gap-2 md:grid-cols-4">
-                    <NCheckbox
-                      v-for="option in fertilizerLandTypeOptions"
-                      :key="option.value"
-                      :value="option.value"
-                    >
-                      {{ option.label }}
-                    </NCheckbox>
-                  </div>
-                </NCheckboxGroup>
-                <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                  施肥前会优先按土地类型过滤，仅对命中范围的地块执行施肥策略。
-                </p>
-              </div>
-
-              <BaseSelect
-                v-model="localAutomationSettings.automation.fertilizer"
-                label="施肥策略"
-                :options="fertilizerOptions"
-              />
-
-              <div class="flex items-center gap-4">
-                <BaseSwitch
-                  v-model="localAutomationSettings.automation.fertilizer_multi_season"
-                  label="多季补肥"
-                />
-              </div>
-
-              <div v-if="localAutomationSettings.automation.fertilizer === 'smart'" class="flex flex-wrap gap-4 rounded bg-amber-50 p-3 text-sm dark:bg-amber-900/20">
-                <BaseInput
-                  v-model.number="localAutomationSettings.automation.fertilizer_smart_seconds"
-                  label="快成熟判定秒数"
-                  type="number"
-                  min="30"
-                  max="3600"
-                  class="w-40"
-                />
-                <span class="flex items-end pb-2 text-xs text-gray-500 dark:text-gray-400">
-                  距离成熟时间 ≤ 此秒数时施有机肥（默认300秒=5分钟）
-                </span>
-              </div>
-            </div>
-
-            <div class="flex justify-end gap-2 border-t pt-3 dark:border-gray-700">
-              <BaseButton
-                variant="primary"
-                size="sm"
-                :loading="automationSaving"
-                @click="saveAutomationSettings"
-              >
-                保存自动控制
-              </BaseButton>
-            </div>
-          </div>
+          <AutomationSettingsForm
+            v-else
+            v-model="localAutomationSettings"
+            :saving="automationSaving"
+            :fertilizer-land-type-options="fertilizerLandTypeOptions"
+            :fertilizer-options="fertilizerOptions"
+            @save="saveAutomationSettings"
+          />
         </div>
 
         <!-- 系统设置 -->
@@ -1926,19 +1910,28 @@ async function handleResetSystemConfig() {
             系统设置
           </h3>
 
-          <div class="space-y-4">
-            <div class="border farm-card border-gray-200 rounded-2xl bg-white p-4 shadow-md dark:border-gray-700 dark:bg-gray-800">
-              <h4 class="mb-3 flex items-center gap-2 text-base text-gray-900 font-bold dark:text-gray-100">
-                <span class="i-carbon-settings" />
-                运行环境
-              </h4>
+          <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
+            <section class="farm-card rounded-lg p-4">
+              <div class="mb-4 flex items-start gap-3">
+                <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-900/25 dark:text-blue-400">
+                  <span class="i-carbon-settings-adjust text-xl" />
+                </div>
+                <div>
+                  <h4 class="text-base text-gray-900 font-bold dark:text-gray-100">
+                    运行环境
+                  </h4>
+                  <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                    服务器连接、时区与客户端设备参数
+                  </p>
+                </div>
+              </div>
 
               <div v-if="systemConfigLoading" class="py-8 text-center text-gray-500">
                 <span class="i-svg-spinners-90-ring-with-bg inline-block text-2xl" />
               </div>
-              <div v-else class="space-y-4">
-                <div v-if="devicePresets.length" class="space-y-2">
-                  <label class="block text-sm text-gray-700 font-medium dark:text-gray-300">设备预设</label>
+              <div v-else class="space-y-3">
+                <div v-if="devicePresets.length" class="border border-gray-200 rounded-lg bg-gray-50/70 p-3 dark:border-gray-700 dark:bg-gray-900/30">
+                  <label class="mb-2 block text-sm text-gray-700 font-medium dark:text-gray-300">设备预设</label>
                   <div class="flex flex-wrap gap-2">
                     <NButton
                       v-for="preset in devicePresets"
@@ -1954,27 +1947,28 @@ async function handleResetSystemConfig() {
                   </div>
                 </div>
 
-                <BaseInput
-                  v-model="localSystemConfig.serverUrl"
-                  label="服务器地址"
-                  type="text"
-                  placeholder="wss://..."
-                />
-
-                <div>
-                  <BaseSelect
-                    v-model="localSystemConfig.timeZone"
-                    label="系统时区"
-                    :options="timeZoneOptions"
+                <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <BaseInput
+                    v-model="localSystemConfig.serverUrl"
+                    label="服务器地址"
+                    type="text"
+                    placeholder="wss://..."
                   />
-                  <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
-                    每日礼包、好友额度、任务统计、安静时段和日志时间均以此时区为准；推荐使用北京时间 / 上海。
-                  </p>
+                  <div>
+                    <BaseSelect
+                      v-model="localSystemConfig.timeZone"
+                      label="系统时区"
+                      :options="timeZoneOptions"
+                    />
+                    <p class="mt-1 text-xs text-gray-500 leading-relaxed dark:text-gray-400">
+                      礼包、任务、安静时段和日志均以此时区为准。
+                    </p>
+                  </div>
                 </div>
 
                 <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div class="flex flex-col gap-1.5">
-                    <label class="text-sm text-gray-700 font-medium dark:text-gray-300">平台</label>
+                  <div class="border border-gray-200 rounded-lg bg-gray-50/70 p-3 dark:border-gray-700 dark:bg-gray-900/30">
+                    <label class="mb-2 block text-sm text-gray-700 font-medium dark:text-gray-300">平台</label>
                     <div class="flex flex-wrap gap-2">
                       <NButton
                         v-for="option in platformOptions"
@@ -1988,8 +1982,8 @@ async function handleResetSystemConfig() {
                       </NButton>
                     </div>
                   </div>
-                  <div class="flex flex-col gap-1.5">
-                    <label class="text-sm text-gray-700 font-medium dark:text-gray-300">系统</label>
+                  <div class="border border-gray-200 rounded-lg bg-gray-50/70 p-3 dark:border-gray-700 dark:bg-gray-900/30">
+                    <label class="mb-2 block text-sm text-gray-700 font-medium dark:text-gray-300">系统</label>
                     <div class="flex flex-wrap gap-2">
                       <NButton
                         v-for="option in osOptions"
@@ -2011,7 +2005,6 @@ async function handleResetSystemConfig() {
                     label="客户端版本"
                     type="text"
                     :placeholder="defaultSystemConfig.deviceInfo.clientVersion || '从服务器加载中...'"
-                    class="sm:col-span-2"
                   />
                   <BaseInput
                     v-model="localSystemConfig.deviceInfo.sysSoftware"
@@ -2042,7 +2035,6 @@ async function handleResetSystemConfig() {
                     label="User-Agent"
                     type="text"
                     placeholder="Mozilla/5.0 ..."
-                    class="sm:col-span-2"
                   />
                 </div>
 
@@ -2055,15 +2047,79 @@ async function handleResetSystemConfig() {
                   </BaseButton>
                 </div>
               </div>
-            </div>
+            </section>
 
-            <div class="border farm-card border-gray-200 rounded-2xl bg-white p-4 shadow-md dark:border-gray-700 dark:bg-gray-800">
-              <h4 class="mb-3 flex items-center gap-2 text-base text-gray-900 font-bold dark:text-gray-100">
-                🔑 修改管理员密码
-              </h4>
+            <div class="min-w-0 space-y-4">
+              <section class="farm-card rounded-lg p-4">
+                <div class="mb-4 flex items-start gap-3">
+                  <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-600 dark:bg-violet-900/25 dark:text-violet-400">
+                    <span class="i-carbon-login text-xl" />
+                  </div>
+                  <div>
+                    <h4 class="text-base text-gray-900 font-bold dark:text-gray-100">
+                      登录设置
+                    </h4>
+                    <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                      控制添加账号时可用的扫码登录方式
+                    </p>
+                  </div>
+                </div>
 
-              <div class="space-y-3">
-                <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <div class="border border-gray-200 rounded-lg bg-gray-50/70 p-3 dark:border-gray-700 dark:bg-gray-900/30">
+                    <BaseSwitch v-model="localLoginSettings.wechatQrLogin" label="微信扫码登录" />
+                  </div>
+                  <div class="border border-gray-200 rounded-lg bg-gray-50/70 p-3 dark:border-gray-700 dark:bg-gray-900/30">
+                    <BaseSwitch v-model="localLoginSettings.qqQrLogin" label="QQ扫码登录" />
+                  </div>
+                </div>
+
+                <div
+                  v-if="localLoginSettings.qqQrLogin"
+                  class="mt-4 grid grid-cols-1 gap-3 rounded-lg border border-gray-200 bg-gray-50/70 p-4 sm:grid-cols-2 dark:border-gray-700 dark:bg-gray-900/30"
+                >
+                  <BaseInput
+                    v-model="localLoginSettings.napCatEndpoint"
+                    label="NapCat接口地址"
+                    type="text"
+                    placeholder="http://127.0.0.1:6099"
+                  />
+                  <BaseInput
+                    v-model="localLoginSettings.napCatSignature"
+                    label="NapCat接口签名"
+                    type="password"
+                    placeholder="请输入 NapCat 接口签名"
+                  />
+                </div>
+
+                <div class="mt-3 flex justify-end border-t pt-3 dark:border-gray-700">
+                  <BaseButton
+                    variant="primary"
+                    size="sm"
+                    :loading="loginSettingsSaving"
+                    @click="handleSaveLoginSettings"
+                  >
+                    保存登录设置
+                  </BaseButton>
+                </div>
+              </section>
+
+              <section class="farm-card rounded-lg p-4">
+                <div class="mb-4 flex items-start gap-3">
+                  <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-600 dark:bg-amber-900/25 dark:text-amber-400">
+                    <span class="i-carbon-password text-xl" />
+                  </div>
+                  <div>
+                    <h4 class="text-base text-gray-900 font-bold dark:text-gray-100">
+                      修改管理员密码
+                    </h4>
+                    <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                      更新后台管理登录凭据
+                    </p>
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <BaseInput
                     v-model="passwordForm.old"
                     label="当前密码"
@@ -2084,7 +2140,7 @@ async function handleResetSystemConfig() {
                   />
                 </div>
 
-                <div class="flex items-center justify-end pt-1">
+                <div class="mt-3 flex items-center justify-end border-t pt-3 dark:border-gray-700">
                   <BaseButton
                     variant="primary"
                     size="sm"
@@ -2094,18 +2150,26 @@ async function handleResetSystemConfig() {
                     修改管理员密码
                   </BaseButton>
                 </div>
-              </div>
-            </div>
+              </section>
 
-            <div class="border farm-card border-gray-200 rounded-2xl bg-white p-4 shadow-md dark:border-gray-700 dark:bg-gray-800">
-              <h4 class="mb-3 flex items-center gap-2 text-base text-gray-900 font-bold dark:text-gray-100">
-                🔔 下线提醒
-              </h4>
+              <section class="farm-card rounded-lg p-4">
+                <div class="mb-4 flex items-start gap-3">
+                  <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-green-50 text-green-600 dark:bg-green-900/25 dark:text-green-400">
+                    <span class="i-carbon-notification text-xl" />
+                  </div>
+                  <div>
+                    <h4 class="text-base text-gray-900 font-bold dark:text-gray-100">
+                      下线提醒
+                    </h4>
+                    <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                      配置账号离线后的通知与清理
+                    </p>
+                  </div>
+                </div>
 
-              <div class="space-y-3">
-                <div class="grid grid-cols-1 gap-3">
-                  <div class="flex flex-col gap-1.5">
-                    <div class="flex items-center justify-between">
+                <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div class="flex min-w-0 flex-col gap-1.5">
+                    <div class="flex min-h-6 items-center justify-between gap-2">
                       <span class="text-sm text-gray-700 font-medium dark:text-gray-300">推送渠道</span>
                       <BaseButton
                         variant="text"
@@ -2121,37 +2185,35 @@ async function handleResetSystemConfig() {
                       :options="channelOptions"
                     />
                   </div>
-                </div>
 
-                <BaseInput
-                  v-if="offlineChannelUsesEndpoint"
-                  v-model="localOffline.endpoint"
-                  :label="offlineEndpointLabel"
-                  type="text"
-                  :placeholder="offlineEndpointPlaceholder"
-                />
-
-                <BaseInput
-                  v-if="!isDingTalkChannel"
-                  v-model="localOffline.token"
-                  label="Token"
-                  type="text"
-                  placeholder="接收端 token"
-                />
-
-                <template v-else>
                   <BaseInput
-                    v-model="localOffline.secret"
-                    label="加签密钥（可选）"
-                    type="password"
-                    placeholder="仅在机器人开启加签时填写 SEC..."
+                    v-if="offlineChannelUsesEndpoint"
+                    v-model="localOffline.endpoint"
+                    :label="offlineEndpointLabel"
+                    type="text"
+                    :placeholder="offlineEndpointPlaceholder"
                   />
-                  <p class="text-xs text-gray-500 leading-relaxed dark:text-gray-400">
-                    从群机器人的设置页复制完整 Webhook；只有开启“加签”时才需要填写加签密钥。
-                  </p>
-                </template>
 
-                <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <BaseInput
+                    v-if="!isDingTalkChannel"
+                    v-model="localOffline.token"
+                    :label="offlineTokenLabel"
+                    type="text"
+                    :placeholder="offlineTokenPlaceholder"
+                  />
+
+                  <template v-else>
+                    <BaseInput
+                      v-model="localOffline.secret"
+                      label="加签密钥（可选）"
+                      type="password"
+                      placeholder="仅在机器人开启加签时填写 SEC..."
+                    />
+                    <p class="text-xs text-gray-500 leading-relaxed sm:col-span-2 dark:text-gray-400">
+                      从群机器人的设置页复制完整 Webhook；只有开启“加签”时才需要填写加签密钥。
+                    </p>
+                  </template>
+
                   <BaseInput
                     v-model="localOffline.title"
                     label="标题"
@@ -2165,36 +2227,36 @@ async function handleResetSystemConfig() {
                     min="0"
                     placeholder="0 表示不删除"
                   />
+                  <BaseInput
+                    v-model="localOffline.msg"
+                    label="内容"
+                    type="text"
+                    placeholder="提醒内容"
+                    class="sm:col-span-2"
+                  />
                 </div>
 
-                <BaseInput
-                  v-model="localOffline.msg"
-                  label="内容"
-                  type="text"
-                  placeholder="提醒内容"
-                />
-              </div>
-
-              <div class="mt-4 flex justify-end gap-2 border-t pt-3 dark:border-gray-700">
-                <BaseButton
-                  variant="secondary"
-                  size="sm"
-                  :loading="offlineTesting"
-                  :disabled="offlineSaving"
-                  @click="handleTestOffline"
-                >
-                  测试通知
-                </BaseButton>
-                <BaseButton
-                  variant="primary"
-                  size="sm"
-                  :loading="offlineSaving"
-                  :disabled="offlineTesting"
-                  @click="handleSaveOffline"
-                >
-                  保存下线提醒设置
-                </BaseButton>
-              </div>
+                <div class="mt-3 flex justify-end gap-2 border-t pt-3 dark:border-gray-700">
+                  <BaseButton
+                    variant="secondary"
+                    size="sm"
+                    :loading="offlineTesting"
+                    :disabled="offlineSaving"
+                    @click="handleTestOffline"
+                  >
+                    测试通知
+                  </BaseButton>
+                  <BaseButton
+                    variant="primary"
+                    size="sm"
+                    :loading="offlineSaving"
+                    :disabled="offlineTesting"
+                    @click="handleSaveOffline"
+                  >
+                    保存下线提醒设置
+                  </BaseButton>
+                </div>
+              </section>
             </div>
           </div>
         </div>

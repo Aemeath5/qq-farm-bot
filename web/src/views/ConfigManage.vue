@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { useMediaQuery } from '@vueuse/core'
-import { NButton, NInput, NPagination } from 'naive-ui'
+import { NButton } from 'naive-ui/es/button'
+import { NInput } from 'naive-ui/es/input'
+import { NPagination } from 'naive-ui/es/pagination'
 import { computed, onMounted, ref, watch } from 'vue'
-import api from '@/api'
+import api, { getApiErrorMessage } from '@/api'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import { useToastStore } from '@/stores/toast'
@@ -326,11 +328,11 @@ async function handleToggleBlacklist(seedId: number) {
         toast.success(data.message || '操作成功')
       }
       else {
-        toast.error(data.error || '操作失败')
+        toast.error(getApiErrorMessage(data, '操作失败'))
       }
     }
     catch (e: any) {
-      toast.error(e.response?.data?.error || e.message)
+      toast.error(getApiErrorMessage(e, '请求失败'))
     }
   })
 }

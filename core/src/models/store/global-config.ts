@@ -1,8 +1,8 @@
-import type { AccountConfig, OfflineReminder, SystemConfig, UIConfig } from '../../types/config';
+import type { AccountConfig, LoginSettings, OfflineReminder, SystemConfig, UIConfig } from '../../types/config';
 export {};
 
 const { readTextFile, writeJsonFileAtomic } = require('../../services/json-db');
-const { DEFAULT_CLIENT_VERSION, DEFAULT_TIME_ZONE, normalizeTimeZone } = require('../../config/config');
+const { DEFAULT_CLIENT_VERSION, DEFAULT_TIME_ZONE, normalizeTimeZone, resolveClientVersionUpdatedAt } = require('../../config/config');
 
 const sharedState = require('./shared-state');
 
@@ -10,7 +10,7 @@ const {
     STORE_FILE,
     PUSHOO_CHANNELS,
     DEFAULT_OFFLINE_REMINDER,
-    isManagedDefaultClientVersion,
+    DEFAULT_LOGIN_SETTINGS,
     globalConfig,
     normalizeAccountConfig,
     cloneAccountConfig,
@@ -113,6 +113,30 @@ function getOfflineReminder(): OfflineReminder {
     return normalizeOfflineReminder(globalConfig.offlineReminder);
 }
 
+function normalizeLoginSettings(input: unknown): LoginSettings {
+    const src: Record<string, any> = (input && typeof input === 'object') ? input as Record<string, any> : {};
+    return {
+        wechatQrLogin: typeof src.wechatQrLogin === 'boolean' ? src.wechatQrLogin : DEFAULT_LOGIN_SETTINGS.wechatQrLogin,
+        qqQrLogin: typeof src.qqQrLogin === 'boolean' ? src.qqQrLogin : DEFAULT_LOGIN_SETTINGS.qqQrLogin,
+        napCatEndpoint: typeof src.napCatEndpoint === 'string' ? src.napCatEndpoint.trim() : DEFAULT_LOGIN_SETTINGS.napCatEndpoint,
+        napCatSignature: typeof src.napCatSignature === 'string' ? src.napCatSignature.trim() : DEFAULT_LOGIN_SETTINGS.napCatSignature,
+    };
+}
+
+function getLoginSettings(): LoginSettings {
+    return normalizeLoginSettings(globalConfig.loginSettings);
+}
+
+function setLoginSettings(cfg: Partial<LoginSettings> | undefined): LoginSettings {
+    const next = normalizeLoginSettings({ ...getLoginSettings(), ...(cfg || {}) });
+    if (next.qqQrLogin && (!next.napCatEndpoint || !next.napCatSignature)) {
+        throw new Error('开启 QQ 扫码登录前，请配置 NapCat 接口地址和接口签名');
+    }
+    globalConfig.loginSettings = next;
+    saveGlobalConfig();
+    return getLoginSettings();
+}
+
 function setOfflineReminder(cfg: Partial<OfflineReminder> | undefined): OfflineReminder {
     const current = normalizeOfflineReminder(globalConfig.offlineReminder);
     globalConfig.offlineReminder = normalizeOfflineReminder({ ...current, ...(cfg || {}) });
@@ -138,9 +162,16 @@ function setSystemConfig(config: Partial<SystemConfig> | undefined): SystemConfi
     const srcDevice = (config.deviceInfo && typeof config.deviceInfo === 'object') ? config.deviceInfo : {};
     const topVersion = String(config.clientVersion || '').trim();
     const deviceVersion = String((srcDevice as any).clientVersion || '').trim();
-    const customDeviceVersion = deviceVersion && !isManagedDefaultClientVersion(deviceVersion) ? deviceVersion : '';
-    const customTopVersion = topVersion && !isManagedDefaultClientVersion(topVersion) ? topVersion : '';
-    const clientVersion = customDeviceVersion || customTopVersion || DEFAULT_DEVICE_INFO.clientVersion;
+    const requestedVersion = deviceVersion || topVersion;
+    const clientVersion = requestedVersion || DEFAULT_DEVICE_INFO.clientVersion;
+    const currentVersion = String(globalConfig.systemConfig?.clientVersion || DEFAULT_DEVICE_INFO.clientVersion).trim();
+    const currentUpdatedAt = Number(globalConfig.systemConfig?.clientVersionUpdatedAt);
+    const clientVersionUpdatedAt = resolveClientVersionUpdatedAt(
+        clientVersion,
+        currentVersion,
+        currentUpdatedAt,
+        config.clientVersionUpdatedAt,
+    );
     const deviceInfo = {
         os: String((srcDevice as any).os || DEFAULT_DEVICE_INFO.os).trim(),
         clientVersion,
@@ -153,6 +184,7 @@ function setSystemConfig(config: Partial<SystemConfig> | undefined): SystemConfi
     globalConfig.systemConfig = {
         serverUrl: String(config.serverUrl || '').trim(),
         clientVersion: deviceInfo.clientVersion,
+        clientVersionUpdatedAt,
         platform: String(config.platform || 'qq').trim(),
         os: deviceInfo.os,
         timeZone: normalizeTimeZone(config.timeZone || DEFAULT_TIME_ZONE),
@@ -167,6 +199,7 @@ const { loadGlobalConfig } = sharedState;
 loadGlobalConfig();
 // Apply offlineReminder normalization after load
 globalConfig.offlineReminder = normalizeOfflineReminder(globalConfig.offlineReminder);
+globalConfig.loginSettings = normalizeLoginSettings(globalConfig.loginSettings);
 if (sharedState.systemConfigMigrated) {
     saveGlobalConfig();
     sharedState.systemConfigMigrated = false;
@@ -176,6 +209,8 @@ module.exports = {
     saveGlobalConfig,
     getUI,
     setUITheme,
+    getLoginSettings,
+    setLoginSettings,
     getOfflineReminder,
     setOfflineReminder,
     getSystemConfig,

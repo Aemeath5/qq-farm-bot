@@ -1,5 +1,6 @@
  {
   "name": "qq-farm-bot-ui",
+  "version": "20260908",
   "packageManager": "pnpm@10.30.2",
   "scripts": {
     "dev:core": "pnpm -C core dev",
@@ -17,10 +18,5 @@
     "package:mac": "pnpm build && pnpm -C core build:mac",
     "package:release": "pnpm build && pnpm -C core build:release",
     "install:all": "pnpm install -r --prod=false"
-  },
-  "pnpm": {
-    "overrides": {
-      "@babel/traverse": "7.26.10"
-    }
   }
 }

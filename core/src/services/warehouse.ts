@@ -24,6 +24,8 @@ const FERTILIZER_RELATED_IDS: Set<number> = new Set([
 const FERTILIZER_CONTAINER_LIMIT_HOURS: number = 990;
 const NORMAL_CONTAINER_ID: number = 1011;
 const ORGANIC_CONTAINER_ID: number = 1012;
+const CHARITY_SETTLEMENT_GIFT_ID: number = 101604;
+const SPECIAL_GIFT_CHECK_COOLDOWN_MS: number = 5 * 60 * 1000;
 const NORMAL_FERTILIZER_ITEM_HOURS: Map<number, number> = new Map([
     [80001, 1], [80002, 4], [80003, 8], [80004, 12],
 ]);
@@ -32,6 +34,7 @@ const ORGANIC_FERTILIZER_ITEM_HOURS: Map<number, number> = new Map([
 ]);
 let fertilizerGiftDoneDateKey: string = '';
 let fertilizerGiftLastOpenAt: number = 0;
+let charitySettlementGiftLastOpenAt: number = 0;
 let pendingBagRequest: Promise<any> | null = null;
 
 // ============ API ============
@@ -404,6 +407,50 @@ async function openFertilizerGiftPacksSilently(): Promise<number> {
     return autoOpenFertilizerGiftPacks();
 }
 
+async function openCharitySettlementGiftPacksSilently(): Promise<number> {
+    const now: number = Date.now();
+    if (now - charitySettlementGiftLastOpenAt < SPECIAL_GIFT_CHECK_COOLDOWN_MS) return 0;
+    charitySettlementGiftLastOpenAt = now;
+
+    try {
+        const bagReply: any = await getBag();
+        const giftItems: any[] = getBagItems(bagReply).filter((item: any) => (
+            toNum(item?.id) === CHARITY_SETTLEMENT_GIFT_ID
+            && !isItemLocked(item)
+            && toNum(item?.count) > 0
+        ));
+        if (giftItems.length === 0) return 0;
+
+        let opened: number = 0;
+        for (const item of giftItems) {
+            const count: number = Math.max(1, toNum(item?.count));
+            try {
+                await useItem(CHARITY_SETTLEMENT_GIFT_ID, count, [], toNum(item?.uid));
+                opened += count;
+            } catch {
+                // Retry on a later cooldown if the bag changed or the request failed.
+            }
+        }
+
+        if (opened > 0) {
+            log('仓库', `自动打开公益小红花结算礼包 x${opened}`, {
+                module: 'warehouse',
+                event: 'charity_settlement_gift_open',
+                result: 'ok',
+                count: opened,
+            });
+        }
+        return opened;
+    } catch (e: any) {
+        logWarn('仓库', `打开公益小红花结算礼包失败: ${e.message}`, {
+            module: 'warehouse',
+            event: 'charity_settlement_gift_open',
+            result: 'error',
+        });
+        return 0;
+    }
+}
+
 function getGoldFromItems(items: any[]): number {
     for (const item of (items || [])) {
         const id: number = toNum(item.id);
@@ -509,6 +556,7 @@ async function getBagDetail(): Promise<any> {
         const groupKey: string = `uid:${uid}`;
         const info: any = getItemById(id) || null;
         let name: string = info && info.name ? String(info.name) : '';
+        const itemType: number = info ? (Number(info.type) || 0) : 0;
         let category: string = 'item';
         if (id === 1 || id === 1001) {
             name = '金币';
@@ -516,10 +564,13 @@ async function getBagDetail(): Promise<any> {
         } else if (id === 1101) {
             name = '经验';
             category = 'exp';
-        } else if (getPlantByFruitId(id)) {
+        } else if (itemType === 17) {
+            if (!name) name = `${getFruitName(id)}果实`;
+            category = 'mutant';
+        } else if (itemType === 6 || getPlantByFruitId(id)) {
             if (!name) name = `${getFruitName(id)}果实`;
             category = 'fruit';
-        } else if (getPlantBySeedId(id)) {
+        } else if (itemType === 5 || getPlantBySeedId(id)) {
             const p: any = getPlantBySeedId(id);
             if (!name) name = `${p && p.name ? p.name : '未知'}种子`;
             category = 'seed';
@@ -550,7 +601,7 @@ async function getBagDetail(): Promise<any> {
                 name,
                 image: getItemImageById(id),
                 category,
-                itemType: info ? (Number(info.type) || 0) : 0,
+                itemType,
                 sellable: sellInfo.sellable,
                 sellStatus: sellInfo.status,
                 sellCondition: sellInfo.condition,
@@ -582,9 +633,9 @@ async function getBagDetail(): Promise<any> {
         const taRaw: number = Number(a.itemType || 0);
         const tbRaw: number = Number(b.itemType || 0);
         const typePriority: Map<number, number> = new Map([
-            [17, 0],
-            [5, 1],
-            [6, 2],
+            [6, 0],
+            [17, 1],
+            [5, 2],
         ]);
         const ta: number = typePriority.has(taRaw) ? typePriority.get(taRaw) as number : (taRaw > 0 ? (1000 + taRaw) : Number.MAX_SAFE_INTEGER);
         const tb: number = typePriority.has(tbRaw) ? typePriority.get(tbRaw) as number : (tbRaw > 0 ? (1000 + tbRaw) : Number.MAX_SAFE_INTEGER);
@@ -760,6 +811,7 @@ module.exports = {
     useItem,
     batchUseItems,
     openFertilizerGiftPacksSilently,
+    openCharitySettlementGiftPacksSilently,
     getFertilizerGiftDailyState: () => ({
         key: 'fertilizer_gift_open',
         doneToday: fertilizerGiftDoneDateKey === getSystemDateKey(),

@@ -1,6 +1,14 @@
 export {};
 const { createScheduler } = require('../services/scheduler');
 
+const DEFAULT_API_CALL_TIMEOUT_MS = 10000;
+// 好友现场天气需要逐个 Enter/Leave，单批最多 5 位好友；
+// 好友列表只读缓存或拉一次名单，给的余量少一些。
+const API_CALL_TIMEOUTS_MS: Record<string, number> = {
+    scanWeatherFriends: 60000,
+    getWeatherFriends: 30000,
+};
+
 interface WorkerManagerOptions {
     fork: any;
     WorkerThread: any;
@@ -16,6 +24,7 @@ interface WorkerManagerOptions {
     buildConfigSnapshotForAccount: (accountId: string) => any;
     getOfflineAutoDeleteMs: () => number;
     triggerOfflineReminder: (payload: any) => void;
+    sendConfiguredPush?: (payload: any) => Promise<void> | void;
     addOrUpdateAccount: (acc: any) => any;
     deleteAccount: (id: string) => void;
     onStatusSync?: (accountId: string, status: any, accountName?: string) => void;
@@ -38,6 +47,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
         buildConfigSnapshotForAccount,
         getOfflineAutoDeleteMs,
         triggerOfflineReminder,
+        sendConfiguredPush,
         addOrUpdateAccount,
         deleteAccount,
         onStatusSync,
@@ -125,6 +135,8 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 code: account.code,
                 platform: account.platform,
                 systemTimeZone: initialConfigSnapshot.systemTimeZone,
+                systemServerUrl: initialConfigSnapshot.systemServerUrl,
+                systemClientVersion: initialConfigSnapshot.systemClientVersion,
             },
         });
         child.send({ type: 'config_sync', config: initialConfigSnapshot });
@@ -222,11 +234,13 @@ function createWorkerManager(options: WorkerManagerOptions) {
         });
     }
 
-    function errorFromWorkerPayload(payload: any): Error & { code?: string | number } {
+    function errorFromWorkerPayload(payload: any): Error & { code?: string | number; errorMessage?: string } {
         if (!payload || typeof payload !== 'object') return new Error(String(payload || 'Worker API error'));
-        const error: Error & { code?: string | number } = new Error(String(payload.message || 'Worker API error'));
+        const error: Error & { code?: string | number; errorMessage?: string } = new Error(String(payload.message || 'Worker API error'));
         if (payload.name) error.name = String(payload.name);
         if (payload.code !== undefined && payload.code !== null && payload.code !== '') error.code = payload.code;
+        const protocolMessage = payload.errorMessage ?? payload.error_message;
+        if (protocolMessage !== undefined && protocolMessage !== null) error.errorMessage = String(protocolMessage);
         return error;
     }
 
@@ -433,6 +447,18 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 accountName: worker.name,
                 friendCount: saved.length,
             });
+        } else if (msg.type === 'push_notify') {
+            const title = String(msg.title || '').trim();
+            const content = String(msg.content || '').trim();
+            if (!title || !content || typeof sendConfiguredPush !== 'function') return;
+            Promise.resolve(sendConfiguredPush({
+                title,
+                content,
+                accountId,
+                accountName: worker.name,
+            })).catch((e: any) => {
+                log('错误', `事件提醒发送异常: ${e && e.message ? e.message : e}`);
+            });
         } else if (msg.type === 'known_friend_gid_remove') {
             const { getKnownFriendGids, setKnownFriendGids } = require('../models/store');
             const gid: number = Number(msg.gid) || 0;
@@ -456,7 +482,8 @@ function createWorkerManager(options: WorkerManagerOptions) {
             const id = worker.reqId++;
             worker.requests.set(id, { resolve, reject });
 
-            managerScheduler.setTimeoutTask(`api_timeout_${accountId}_${id}`, 10000, () => {
+            const timeoutMs = API_CALL_TIMEOUTS_MS[method] || DEFAULT_API_CALL_TIMEOUT_MS;
+            managerScheduler.setTimeoutTask(`api_timeout_${accountId}_${id}`, timeoutMs, () => {
                 if (worker.requests.has(id)) {
                     worker.requests.delete(id);
                     reject(new Error('API Timeout'));

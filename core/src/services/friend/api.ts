@@ -7,6 +7,7 @@ const { sendMsgAsync, getUserState, GatewayError } = require('../../utils/networ
 const { types } = require('../../utils/proto');
 const { toLong, toNum, log, logWarn, sleep, randomDelay } = require('../../utils/utils');
 const { getFarmingSkillGiftCount } = require('../dog-skill-gifts');
+const { recordFriendDogFromEnterReply } = require('./pet-cache');
 const {
     syncKnownFriendGidsFromRecentVisitors,
     fetchQqFriendsByKnownGids,
@@ -24,19 +25,21 @@ function schedulerRef(): any {
     return _scheduler;
 }
 
+const allFriendsRequests: Partial<Record<'low' | 'normal', Promise<any>>> = {};
+
 // ============ 好友 API ============
-export async function getAllFriends(forceSync: boolean = false): Promise<any> {
+async function fetchAllFriends(forceSync: boolean, priority: 'low' | 'normal'): Promise<any> {
     const isQQ: boolean = CONFIG.platform === 'qq';
     if (isQQ) {
-        await syncKnownFriendGidsFromRecentVisitors(forceSync);
-        const friendsFromKnownGids: any[] = await fetchQqFriendsByKnownGids();
+        await syncKnownFriendGidsFromRecentVisitors(forceSync, priority);
+        const friendsFromKnownGids: any[] = await fetchQqFriendsByKnownGids(priority);
         if (friendsFromKnownGids.length > 0) {
             syncKnownFriendGidsFromFriends(friendsFromKnownGids);
             return buildFriendReply(friendsFromKnownGids);
         }
 
         try {
-            const legacyFriends: any[] = dedupeFriendsByGid(await fetchQqFriendsByLegacyMethod());
+            const legacyFriends: any[] = dedupeFriendsByGid(await fetchQqFriendsByLegacyMethod(priority));
             if (legacyFriends.length > 0) {
                 syncKnownFriendGidsFromFriends(legacyFriends);
             } else if (getEffectiveKnownQqFriendGids().length === 0) {
@@ -49,6 +52,7 @@ export async function getAllFriends(forceSync: boolean = false): Promise<any> {
             return buildFriendReply(legacyFriends);
         } catch (e: any) {
             if (getEffectiveKnownQqFriendGids().length === 0) {
+                if (e?.name === 'GatewayError' || typeof e?.errorMessage === 'string') throw e;
                 throw new Error(`QQ 好友列表获取失败，请先在好友页维护已知好友 GID 列表。${e.message}`);
             }
             throw e;
@@ -56,8 +60,24 @@ export async function getAllFriends(forceSync: boolean = false): Promise<any> {
     }
 
     const body: Uint8Array = types.GetAllFriendsRequest.encode(types.GetAllFriendsRequest.create({})).finish();
-    const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'GetAll', body);
+    const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'GetAll', body, { priority });
     return types.GetAllFriendsReply.decode(replyBody);
+}
+
+export async function getAllFriends(forceSync: boolean = false, priority: 'low' | 'normal' = 'normal'): Promise<any> {
+    // 同优先级好友列表请求合并，避免页面刷新、巡田和后台同步同时重复拉取。
+    // 低优先级请求不会阻塞普通请求；反过来低优先级可以复用正在执行的普通请求。
+    if (priority === 'low' && allFriendsRequests.normal) return allFriendsRequests.normal;
+    const current = allFriendsRequests[priority];
+    if (current) return current;
+
+    const request = fetchAllFriends(forceSync, priority);
+    allFriendsRequests[priority] = request;
+    try {
+        return await request;
+    } finally {
+        if (allFriendsRequests[priority] === request) delete allFriendsRequests[priority];
+    }
 }
 
 export async function acceptFriends(gids: number[]): Promise<any> {
@@ -68,27 +88,52 @@ export async function acceptFriends(gids: number[]): Promise<any> {
     return types.AcceptFriendsReply.decode(replyBody);
 }
 
+export async function rejectFriends(gids: number[]): Promise<any> {
+    const body: Uint8Array = types.RejectFriendsRequest.encode(types.RejectFriendsRequest.create({
+        friend_gids: gids.map((g: number) => toLong(g)),
+    })).finish();
+    const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'RejectFriends', body);
+    return types.RejectFriendsReply.decode(replyBody);
+}
+
 export async function getApplications(): Promise<any> {
     const body: Uint8Array = types.GetApplicationsRequest.encode(types.GetApplicationsRequest.create({})).finish();
     const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'GetApplications', body);
     return types.GetApplicationsReply.decode(replyBody);
 }
 
-export async function enterFriendFarm(friendGid: number): Promise<any> {
+export async function delFriend(gid: number): Promise<any> {
+    const numericGid: number = toNum(gid);
+    if (!numericGid) throw new Error('无效的好友 GID');
+    if (!types.DelFriendRequest || !types.DelFriendReply) {
+        throw new Error('DelFriend 接口类型未加载');
+    }
+
+    const body: Uint8Array = types.DelFriendRequest.encode(types.DelFriendRequest.create({
+        friend_gid: toLong(numericGid),
+    })).finish();
+    const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'DelFriend', body);
+    return types.DelFriendReply.decode(replyBody);
+}
+
+export async function enterFriendFarm(friendGid: number, priority: 'low' | 'normal' = 'normal'): Promise<any> {
     const body: Uint8Array = types.VisitEnterRequest.encode(types.VisitEnterRequest.create({
         host_gid: toLong(friendGid),
         reason: 2,  // ENTER_REASON_FRIEND
     })).finish();
-    const { body: replyBody } = await sendMsgAsync('gamepb.visitpb.VisitService', 'Enter', body);
-    return types.VisitEnterReply.decode(replyBody);
+    const { body: replyBody } = await sendMsgAsync('gamepb.visitpb.VisitService', 'Enter', body, { priority });
+    const reply: any = types.VisitEnterReply.decode(replyBody);
+    // Enter 回包是护主犬信息的唯一来源；所有进好友农场的调用都在这里顺手写缓存，不额外花 RPC。
+    recordFriendDogFromEnterReply(friendGid, reply);
+    return reply;
 }
 
-export async function leaveFriendFarm(friendGid: number): Promise<void> {
+export async function leaveFriendFarm(friendGid: number, priority: 'low' | 'normal' = 'normal'): Promise<void> {
     const body: Uint8Array = types.VisitLeaveRequest.encode(types.VisitLeaveRequest.create({
         host_gid: toLong(friendGid),
     })).finish();
     try {
-        await sendMsgAsync('gamepb.visitpb.VisitService', 'Leave', body);
+        await sendMsgAsync('gamepb.visitpb.VisitService', 'Leave', body, { priority });
     } catch { /* 离开失败不影响主流程 */ }
 }
 
@@ -195,8 +240,8 @@ export async function stealHarvest(friendGid: number, landIds: number[]): Promis
     return reply;
 }
 
-export async function putPlantItems(friendGid: number, landIds: number[], RequestType: any, ReplyType: any, method: string): Promise<number> {
-    const result = await putPlantItemsDetailed(friendGid, landIds, RequestType, ReplyType, method);
+export async function putPlantItems(friendGid: number, landIds: number[], RequestType: any, ReplyType: any, method: string, propagateErrors: boolean = false): Promise<number> {
+    const result = await putPlantItemsDetailed(friendGid, landIds, RequestType, ReplyType, method, propagateErrors);
     if (result.failed.length > 0 && !result.limitReached) {
         log('好友', `放虫/放草部分失败: ${result.failed[0].reason}`, {
             module: 'friend',
@@ -208,7 +253,7 @@ export async function putPlantItems(friendGid: number, landIds: number[], Reques
     return result.ok;
 }
 
-export async function putPlantItemsDetailed(friendGid: number, landIds: number[], RequestType: any, ReplyType: any, method: string): Promise<{ ok: number; failed: any[]; limitReached?: boolean }> {
+export async function putPlantItemsDetailed(friendGid: number, landIds: number[], RequestType: any, ReplyType: any, method: string, propagateErrors: boolean = false): Promise<{ ok: number; failed: any[]; limitReached?: boolean }> {
     const ids: number[] = [...new Set<number>((Array.isArray(landIds) ? landIds : [])
         .map((id: any) => toNum(id))
         .filter((id: number) => id > 0))];
@@ -254,6 +299,7 @@ export async function putPlantItemsDetailed(friendGid: number, landIds: number[]
                 break;
             }
             failed.push({ landId, reason: e && e.message ? e.message : '未知错误' });
+            if (propagateErrors) throw e;
         }
 
         if (index < ids.length - 1 && !schedulerRef().isBadOperationLimitReached()) {
@@ -265,20 +311,20 @@ export async function putPlantItemsDetailed(friendGid: number, landIds: number[]
     return { ok, failed, ...(limitReached ? { limitReached: true } : {}) };
 }
 
-export async function putInsects(friendGid: number, landIds: number[]): Promise<number> {
-    return putPlantItems(friendGid, landIds, types.PutInsectsRequest, types.PutInsectsReply, 'PutInsects');
+export async function putInsects(friendGid: number, landIds: number[], propagateErrors: boolean = false): Promise<number> {
+    return putPlantItems(friendGid, landIds, types.PutInsectsRequest, types.PutInsectsReply, 'PutInsects', propagateErrors);
 }
 
-export async function putWeeds(friendGid: number, landIds: number[]): Promise<number> {
-    return putPlantItems(friendGid, landIds, types.PutWeedsRequest, types.PutWeedsReply, 'PutWeeds');
+export async function putWeeds(friendGid: number, landIds: number[], propagateErrors: boolean = false): Promise<number> {
+    return putPlantItems(friendGid, landIds, types.PutWeedsRequest, types.PutWeedsReply, 'PutWeeds', propagateErrors);
 }
 
-export async function putInsectsDetailed(friendGid: number, landIds: number[]): Promise<{ ok: number; failed: any[]; limitReached?: boolean }> {
-    return putPlantItemsDetailed(friendGid, landIds, types.PutInsectsRequest, types.PutInsectsReply, 'PutInsects');
+export async function putInsectsDetailed(friendGid: number, landIds: number[], propagateErrors: boolean = false): Promise<{ ok: number; failed: any[]; limitReached?: boolean }> {
+    return putPlantItemsDetailed(friendGid, landIds, types.PutInsectsRequest, types.PutInsectsReply, 'PutInsects', propagateErrors);
 }
 
-export async function putWeedsDetailed(friendGid: number, landIds: number[]): Promise<{ ok: number; failed: any[]; limitReached?: boolean }> {
-    return putPlantItemsDetailed(friendGid, landIds, types.PutWeedsRequest, types.PutWeedsReply, 'PutWeeds');
+export async function putWeedsDetailed(friendGid: number, landIds: number[], propagateErrors: boolean = false): Promise<{ ok: number; failed: any[]; limitReached?: boolean }> {
+    return putPlantItemsDetailed(friendGid, landIds, types.PutWeedsRequest, types.PutWeedsReply, 'PutWeeds', propagateErrors);
 }
 
 // 使用社交道具（如友谊果实）

@@ -12,6 +12,8 @@ const store = require('../../models/store');
 const {
     getAccId,
     handleApiError,
+    isGatewayProtocolError,
+    isSoftRuntimeError,
     buildKnownFriendGidSettings,
 } = require('./middleware');
 
@@ -26,6 +28,18 @@ function mountFriendRoutes(app: Application, ctx: AdminContext): void {
 
         try {
             const data = await ctx.provider.getFriends(id, forceSync);
+            res.json({ ok: true, data });
+        } catch (e: any) {
+            handleApiError(res, e);
+        }
+    });
+
+    // 仅读取 Worker 内存中的好友列表缓存，不触发任何游戏协议请求。
+    app.get('/api/friends/cache', async (req: Request, res: Response) => {
+        const id = getAccId(ctx, req);
+        if (!id) return res.status(400).json({ ok: false });
+        try {
+            const data = await ctx.provider.getFriendsCache(id);
             res.json({ ok: true, data });
         } catch (e: any) {
             handleApiError(res, e);
@@ -101,6 +115,19 @@ function mountFriendRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
+    // API: 对指定好友农场使用不需要地块目标的特殊互动道具（例如青蛙使坏瓶）。
+    app.post('/api/friend/:gid/interaction-items/use-farm', async (req: Request, res: Response) => {
+        const id = getAccId(ctx, req);
+        if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
+
+        try {
+            const data = await ctx.provider.useFriendFarmInteractionItem(id, req.params.gid, req.body?.itemId);
+            res.json({ ok: true, data });
+        } catch (e: any) {
+            handleApiError(res, e);
+        }
+    });
+
     // API: 对指定好友执行单次操作（偷菜/浇水/除草/捣乱）
     app.post('/api/friend/:gid/op', async (req: Request, res: Response) => {
         const id = getAccId(ctx, req);
@@ -109,7 +136,45 @@ function mountFriendRoutes(app: Application, ctx: AdminContext): void {
         try {
             const opType = String((req.body || {}).opType || '');
             const data = await ctx.provider.doFriendOp(id, req.params.gid, opType);
+            if (data && data.ok === false) {
+                return res.json({
+                    ok: false,
+                    error: data.errorMessage || data.message || data.error || '好友操作失败',
+                    ...(data.errorMessage ? { errorMessage: data.errorMessage } : {}),
+                    ...(data.errorCode ? { errorCode: data.errorCode } : {}),
+                });
+            }
             res.json({ ok: true, data });
+        } catch (e: any) {
+            handleApiError(res, e);
+        }
+    });
+
+    // API: 游戏内删除好友
+    app.post('/api/friend/:gid/delete', async (req: Request, res: Response) => {
+        const id = getAccId(ctx, req);
+        if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
+
+        try {
+            const gid = Number(req.params.gid);
+            if (!Number.isFinite(gid) || gid <= 0) {
+                return res.status(400).json({ ok: false, error: '无效的好友 GID' });
+            }
+            const data = await ctx.provider.delFriend(id, gid);
+            if (store.addFriendToBlacklist) {
+                store.addFriendToBlacklist(id, gid);
+            }
+            if (store.getKnownFriendGids && store.setKnownFriendGids) {
+                const current = store.getKnownFriendGids(id) || [];
+                const next = current.filter((item: any) => Number(item) !== gid);
+                if (next.length !== current.length) {
+                    store.setKnownFriendGids(id, next);
+                }
+            }
+            if (ctx.provider && typeof ctx.provider.broadcastConfig === 'function') {
+                ctx.provider.broadcastConfig(id);
+            }
+            res.json({ ok: true, message: '删除好友成功', data });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -128,8 +193,9 @@ function mountFriendRoutes(app: Application, ctx: AdminContext): void {
             if (ctx.provider && typeof ctx.provider.getFriends === 'function') {
                 friendsList = await ctx.provider.getFriends(id) || [];
             }
-        } catch {
-            // 忽略获取好友列表失败
+        } catch (error: any) {
+            if (isGatewayProtocolError(error) || isSoftRuntimeError(error)) return handleApiError(res, error);
+            // 非协议错误不影响黑名单本地数据展示
         }
 
         // 构建好友信息映射
@@ -183,8 +249,9 @@ function mountFriendRoutes(app: Application, ctx: AdminContext): void {
             if (ctx.provider && typeof ctx.provider.getFriends === 'function') {
                 friendsList = await ctx.provider.getFriends(id) || [];
             }
-        } catch {
-            // 忽略获取好友列表失败
+        } catch (error: any) {
+            if (isGatewayProtocolError(error) || isSoftRuntimeError(error)) return handleApiError(res, error);
+            // 非协议错误不影响黑名单本地数据展示
         }
 
         // 构建好友信息映射

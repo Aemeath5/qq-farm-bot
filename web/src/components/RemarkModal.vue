@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { NCard, NModal } from 'naive-ui'
+import { NCard } from 'naive-ui/es/card'
+import { NModal } from 'naive-ui/es/modal'
 import { ref, watch } from 'vue'
-import api from '@/api'
+import api, { getApiErrorMessage } from '@/api'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 
@@ -26,13 +27,20 @@ watch(() => props.show, (val) => {
 async function save() {
   if (!props.account)
     return
+
+  const remark = name.value.trim()
+  if (!remark) {
+    errorMessage.value = '请输入备注名称'
+    return
+  }
+
   loading.value = true
   errorMessage.value = ''
   try {
     // 使用 name 字段存储备注，只发送 id 和 name 两个字段
     const payload = {
       id: props.account.id,
-      name: name.value,
+      name: remark,
     }
 
     const res = await api.post('/api/accounts', payload)
@@ -41,11 +49,11 @@ async function save() {
       emit('close')
     }
     else {
-      errorMessage.value = `保存失败: ${res.data.error}`
+      errorMessage.value = `保存失败: ${getApiErrorMessage(res.data, '请求失败')}`
     }
   }
   catch (e: any) {
-    errorMessage.value = `保存失败: ${e.response?.data?.error || e.message}`
+    errorMessage.value = `保存失败: ${getApiErrorMessage(e, '请求失败')}`
   }
   finally {
     loading.value = false

@@ -1,23 +1,29 @@
 <script setup lang="ts">
 import type { FriendInteractionItemDto, FriendInteractionResultDto } from '@/stores/friend'
 import { useIntervalFn } from '@vueuse/core'
-import { NButton, NButtonGroup, NCard, NModal, NPagination, NSpin, NTab, NTabs } from 'naive-ui'
+import { NButton } from 'naive-ui/es/button'
+import { NButtonGroup } from 'naive-ui/es/button-group'
+import { NCard } from 'naive-ui/es/card'
+import { NModal } from 'naive-ui/es/modal'
+import { NPagination } from 'naive-ui/es/pagination'
+import { NSpin } from 'naive-ui/es/spin'
+import { NTab, NTabs } from 'naive-ui/es/tabs'
 import { storeToRefs } from 'pinia'
 import { computed, ref, watch } from 'vue'
-import api from '@/api'
+import api, { getApiErrorMessage } from '@/api'
+import CareerHarvestSteal from '@/components/CareerHarvestSteal.vue'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import LandCard from '@/components/LandCard.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseTextarea from '@/components/ui/BaseTextarea.vue'
 import { useAccountStore } from '@/stores/account'
-import { useActivityCenterStore } from '@/stores/activity-center'
 import { useFriendStore } from '@/stores/friend'
 import { useStatusStore } from '@/stores/status'
 import { useToastStore } from '@/stores/toast'
+import { interactionItemTargetReason } from '@/utils/interaction-item-rules'
 
 const accountStore = useAccountStore()
-const activityStore = useActivityCenterStore()
 const friendStore = useFriendStore()
 const statusStore = useStatusStore()
 const toast = useToastStore()
@@ -30,6 +36,7 @@ const {
   friendLandsLoading,
   friendLandsError,
   friendLandsLoaded,
+  friendCareer,
   blacklist,
   interactRecords,
   interactLoading,
@@ -45,12 +52,6 @@ const {
   knownFriendSettingsLoading,
   knownFriendSettingsSaving,
 } = storeToRefs(friendStore)
-const {
-  qixi,
-  pendingActions: activityPendingActions,
-  actionError: activityActionError,
-  notice: activityNotice,
-} = storeToRefs(activityStore)
 const isQqAccount = computed(() => {
   const acc = currentAccount.value
   if (!acc)
@@ -66,6 +67,9 @@ const currentAccountConnected = computed(() => {
 })
 const currentAccountRunning = computed(() => (
   !!currentAccount.value?.running || currentAccountConnected.value
+))
+const friendDataLoadScope = computed(() => (
+  currentAccountRunning.value ? String(currentAccountId.value || '') : ''
 ))
 
 const knownFriendGidCount = computed(() => knownFriendGids.value.length)
@@ -88,6 +92,7 @@ const filteredKnownFriendGids = computed(() => {
 
 const syncedGidCount = computed(() => filteredKnownFriendGids.value.filter(item => item.synced).length)
 const unsyncedGidCount = computed(() => filteredKnownFriendGids.value.filter(item => !item.synced).length)
+const knownFriendSettingsLoadedAccount = ref('')
 
 async function handleRemoveGidFromList(gid: number) {
   if (!currentAccountId.value)
@@ -112,6 +117,11 @@ async function handleRemoveUnsyncedGids() {
 function openGidListModal() {
   gidSearchKeyword.value = ''
   showGidListModal.value = true
+  const accountId = currentAccountId.value
+  if (accountId && isQqAccount.value && knownFriendSettingsLoadedAccount.value !== accountId) {
+    knownFriendSettingsLoadedAccount.value = accountId
+    void friendStore.fetchKnownFriendSettings(accountId)
+  }
 }
 
 const TABS = [
@@ -123,10 +133,15 @@ const TABS = [
 type TabKey = typeof TABS[number]['key']
 
 const activeTab = ref<TabKey>('friends')
+const friendsLoadedAccount = ref('')
+const blacklistLoadedAccount = ref('')
+const interactRecordsLoadedAccount = ref('')
 
 function setActiveTab(value: string) {
-  if (TABS.some(tab => tab.key === value))
+  if (TABS.some(tab => tab.key === value)) {
     activeTab.value = value as TabKey
+    loadTabData()
+  }
 }
 
 const showConfirm = ref(false)
@@ -160,7 +175,7 @@ async function onConfirm() {
       await pendingAction.value()
     }
     catch (e: any) {
-      toast.error(e?.message || '操作失败')
+      toast.error(getApiErrorMessage(e, '操作失败'))
     }
     finally {
       confirmLoading.value = false
@@ -177,20 +192,8 @@ const expandedFriends = ref<Set<string>>(new Set())
 const selectedInteractionItemId = ref('')
 const selectedInteractionLandIds = ref<Record<string, string[]>>({})
 const lastInteractionResults = ref<Record<string, FriendInteractionResultDto[]>>({})
-const clockNow = ref(Date.now())
 const currentPage = ref(1)
 const pageSize = 25
-
-const qixiGiftActive = computed(() => {
-  const activity = qixi.value
-  if (!activity?.active)
-    return false
-  return !activity.endTime || clockNow.value < activity.endTime
-})
-const qixiSachetBalance = computed(() => {
-  const value = Number(qixi.value?.balances.sachet || 0)
-  return Number.isSafeInteger(value) && value > 0 ? value : 0
-})
 
 const selectedInteractionItem = computed<FriendInteractionItemDto | null>(() => {
   return interactionItems.value.find(item => String(item.itemId) === selectedInteractionItemId.value) || null
@@ -226,6 +229,39 @@ const paginatedFriends = computed(() => {
   return filteredFriends.value.slice(start, end)
 })
 
+// 好友上场宠物徽标：后端按天缓存，进好友农场时顺手更新，另有每日同步补齐，展示不触发任何请求
+const PET_BADGE_CLASSES: Record<string, string> = {
+  protect: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300',
+  other: 'bg-sky-50 text-sky-700 dark:bg-sky-900/20 dark:text-sky-300',
+  none: 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300',
+  unknown: 'bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-400',
+}
+
+function buildFriendPetBadge(friend: any) {
+  const state = String(friend?.petState || 'unknown')
+  const name = String(friend?.pet?.name || '').trim()
+  const image = String(friend?.pet?.image || '')
+  const badgeClass = PET_BADGE_CLASSES[state] || PET_BADGE_CLASSES.unknown
+  if (state === 'protect')
+    return { state, text: name || '护主犬', title: '看家宠物：护主犬（经验满仍会帮忙）', image, class: badgeClass }
+  if (state === 'other')
+    return { state, text: name || '未知宠物', title: `看家宠物：${name || '未知'}`, image, class: badgeClass }
+  if (state === 'none')
+    return { state, text: '无宠物', title: '今天已确认：好友没有上场看家宠物', image: '', class: badgeClass }
+  return { state, text: '宠物待确认', title: '今天还没进过这位好友的农场，宠物信息由每日同步补齐', image: '', class: badgeClass }
+}
+
+const friendPetBadges = computed(() => {
+  const map: Record<string, ReturnType<typeof buildFriendPetBadge>> = {}
+  for (const friend of friends.value)
+    map[String(friend?.gid ?? '')] = buildFriendPetBadge(friend)
+  return map
+})
+
+function friendPetBadge(friend: any) {
+  return friendPetBadges.value[String(friend?.gid ?? '')] || buildFriendPetBadge(friend)
+}
+
 watch(searchKeyword, () => {
   currentPage.value = 1
 })
@@ -253,6 +289,11 @@ function interactionSelectionKey(friendId: unknown, itemId: unknown = selectedIn
   return `${String(itemId || '')}:${friendKey(friendId)}`
 }
 
+function toggleInteractionItem(itemId: unknown) {
+  const nextItemId = String(itemId || '')
+  selectedInteractionItemId.value = selectedInteractionItemId.value === nextItemId ? '' : nextItemId
+}
+
 function selectedInteractionIds(friendId: unknown, itemId: unknown = selectedInteractionItemId.value) {
   return selectedInteractionLandIds.value[interactionSelectionKey(friendId, itemId)] || []
 }
@@ -270,10 +311,10 @@ function hasConfirmedInteractionEffect(land: any, itemId: unknown = selectedInte
 }
 
 function isInteractionLandCandidate(land: any) {
-  return !!land?.unlocked
-    && !land?.occupiedByMaster
-    && !!String(land?.plantName || '').trim()
-    && !['locked', 'empty', 'dead', 'stealable', 'harvested'].includes(String(land?.status || ''))
+  if (selectedInteractionItem.value?.targetKind === 'farm')
+    return false
+  return !!selectedInteractionItem.value
+    && !interactionItemTargetReason(selectedInteractionItem.value.itemId, land)
 }
 
 function isInteractionLandSelected(friendId: unknown, land: any) {
@@ -296,11 +337,9 @@ function interactionLandSelectionLabel(friendId: unknown, land: any) {
     return '已生效'
   if (usedInteractionIdSet(friendId).has(landId))
     return '本次已用'
-  if (['stealable', 'harvested'].includes(String(land?.status || '')))
-    return '成熟不可放'
-  if (!isInteractionLandCandidate(land))
-    return '不可用'
-  return ''
+  return selectedInteractionItem.value
+    ? interactionItemTargetReason(selectedInteractionItem.value.itemId, land)
+    : ''
 }
 
 function setSelectedInteractionIds(friendId: unknown, ids: string[], itemId: unknown = selectedInteractionItemId.value) {
@@ -387,41 +426,49 @@ function interactionFailures(friendId: unknown) {
   return results.filter(result => !result.ok)
 }
 
-function giftQixiSachetToFriend(friend: any, event: Event) {
-  event.stopPropagation()
-  if (!currentAccountId.value || !qixiGiftActive.value || qixiSachetBalance.value < 1)
+async function loadData() {
+  const accountId = currentAccountId.value
+  if (!accountId || !currentAccountRunning.value || activeTab.value !== 'friends' || friendsLoadedAccount.value === accountId)
     return
-  const gid = friendKey(friend?.gid)
-  const name = String(friend?.name || `GID ${gid}`)
-  confirmAction(`确定向 ${name} 赠送 1 个鹊羽香囊吗？`, async () => {
-    const result = await activityStore.giftQixiSachet(currentAccountId.value!, gid)
-    if (!result)
-      throw new Error(activityActionError.value || '鹊羽香囊赠送失败')
-    toast.success(activityNotice.value || `已向 ${name} 赠送 1 个鹊羽香囊`)
-    return result
-  })
+
+  friendsLoadedAccount.value = accountId
+  avatarErrorKeys.value.clear()
+  await friendStore.fetchFriends(accountId)
 }
 
-async function loadData() {
+function loadTabData() {
   const accountId = currentAccountId.value
   if (!accountId || !currentAccountRunning.value)
     return
 
-  avatarErrorKeys.value.clear()
-  const requests = [
-    friendStore.fetchFriends(accountId),
-    friendStore.fetchBlacklist(accountId),
-    friendStore.fetchInteractRecords(accountId),
-    friendStore.fetchInteractionItems(accountId),
-    activityStore.lazyLoad(accountId),
-  ]
-  if (isQqAccount.value)
-    requests.push(friendStore.fetchKnownFriendSettings(accountId))
-  await Promise.allSettled(requests)
+  if (activeTab.value === 'friends')
+    void loadData()
+  if (activeTab.value === 'blacklist' && blacklistLoadedAccount.value !== accountId) {
+    blacklistLoadedAccount.value = accountId
+    void friendStore.fetchBlacklist(accountId)
+  }
+  if (activeTab.value === 'visitors' && interactRecordsLoadedAccount.value !== accountId) {
+    interactRecordsLoadedAccount.value = accountId
+    void friendStore.fetchInteractRecords(accountId)
+  }
 }
 
+function requestUseFarmInteractionItem(friend: any) {
+  const accountId = currentAccountId.value
+  const item = selectedInteractionItem.value
+  if (!accountId || !item || item.targetKind !== 'farm' || item.count < 1)
+    return
+  const key = friendKey(friend?.gid)
+  const name = String(friend?.name || `GID ${key}`)
+  confirmAction(`确定在 ${name} 的农场放出 1 个“${item.name}”吗？`, async () => {
+    const result = await friendStore.useFarmInteractionItem(accountId, key, item.itemId)
+    if (!result)
+      throw new Error(interactionUseError.value || `${item.name}使用失败`)
+    toast.success(result.message || `已在${name}的农场使用${item.name}`)
+    return result
+  })
+}
 useIntervalFn(() => {
-  clockNow.value = Date.now()
   for (const gid of expandedFriends.value) {
     for (const land of friendLands.value[gid] || []) {
       if (land.matureInSec > 0)
@@ -435,23 +482,27 @@ watch(currentAccountId, () => {
   selectedInteractionItemId.value = ''
   selectedInteractionLandIds.value = {}
   lastInteractionResults.value = {}
+  friendsLoadedAccount.value = ''
+  blacklistLoadedAccount.value = ''
+  interactRecordsLoadedAccount.value = ''
+  knownFriendSettingsLoadedAccount.value = ''
   friendStore.resetInteractionState()
   friendStore.resetFriendLandState()
 })
-
-watch([currentAccountId, () => currentAccount.value?.running, currentAccountConnected], () => {
+watch(friendDataLoadScope, (scope) => {
+  if (!scope) {
+    friendsLoadedAccount.value = ''
+    blacklistLoadedAccount.value = ''
+    interactRecordsLoadedAccount.value = ''
+  }
   void loadData()
+  loadTabData()
 }, { immediate: true })
 
 watch(interactionItems, (items) => {
   if (!items.some(item => String(item.itemId) === selectedInteractionItemId.value))
-    selectedInteractionItemId.value = String(items[0]?.itemId || '')
+    selectedInteractionItemId.value = ''
 }, { immediate: true })
-
-watch(qixiGiftActive, (active) => {
-  if (!active)
-    activityActionError.value = ''
-})
 
 async function handleRefreshFriends() {
   if (!currentAccountId.value)
@@ -531,6 +582,32 @@ async function handleToggleBlacklist(friend: any, e: Event) {
   if (!currentAccountId.value)
     return
   await friendStore.toggleBlacklist(currentAccountId.value, Number(friend.gid))
+}
+
+async function handleDeleteFriend(friend: any, e: Event) {
+  e.stopPropagation()
+  if (!currentAccountId.value)
+    return
+  const gid = Number(friend?.gid) || 0
+  const name = String(friend?.name || `GID:${gid}`).trim()
+  confirmAction(
+    `确定删除好友 ${name} 吗？这会真正解除游戏好友关系且不可恢复，并加入本地黑名单。之后自动偷菜、帮忙、捣乱和自动同意申请都会跳过该好友。`,
+    async () => {
+      const result = await friendStore.deleteFriend(currentAccountId.value!, {
+        gid,
+        name: friend?.name,
+        avatarUrl: friend?.avatarUrl,
+      })
+      if (result?.ok) {
+        expandedFriends.value.delete(String(gid))
+        toast.success(result.message || `已删除好友: ${name}`)
+      }
+      else {
+        toast.error(result?.message || '删除好友失败')
+      }
+      return result
+    },
+  )
 }
 
 function getFriendStatusText(friend: any) {
@@ -962,6 +1039,21 @@ async function handleBatchAddKnownFriendGids() {
                     >
                       金币 {{ formatFriendGold(friend.gold) }}
                     </span>
+
+                    <span
+                      class="inline-flex items-center gap-1 rounded px-1.5 py-0.5"
+                      :class="friendPetBadge(friend).class"
+                      :title="friendPetBadge(friend).title"
+                    >
+                      <img
+                        v-if="friendPetBadge(friend).image"
+                        :src="friendPetBadge(friend).image"
+                        class="h-3.5 w-3.5 object-contain"
+                        alt=""
+                        loading="lazy"
+                      >
+                      {{ friendPetBadge(friend).text }}
+                    </span>
                   </div>
                   <div class="text-sm" :class="getFriendStatusText(friend) !== '无操作' ? 'text-green-500 font-medium' : 'text-gray-400'">
                     <span v-if="getFriendStatusText(friend) !== '无操作'" class="farm-badge inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-xs text-green-600 dark:bg-green-900/20 dark:text-green-400">
@@ -973,17 +1065,6 @@ async function handleBatchAddKnownFriendGids() {
               </div>
 
               <div class="flex flex-wrap gap-2">
-                <NButton
-                  v-if="qixiGiftActive"
-                  type="warning"
-                  secondary
-                  size="small"
-                  :disabled="activityPendingActions.giftQixiSachet || qixiSachetBalance < 1"
-                  @click="giftQixiSachetToFriend(friend, $event)"
-                >
-                  <span class="i-carbon-gift mr-1" />
-                  赠香囊 {{ qixiSachetBalance }}
-                </NButton>
                 <NButton
                   type="info"
                   secondary
@@ -1014,6 +1095,15 @@ async function handleBatchAddKnownFriendGids() {
                   @click="handleToggleBlacklist(friend, $event)"
                 >
                   {{ blacklistGidSet.has(Number(friend.gid)) ? '移出黑名单' : '加入黑名单' }}
+                </NButton>
+                <NButton
+                  type="error"
+                  secondary
+                  size="small"
+                  :disabled="!currentAccountRunning"
+                  @click="handleDeleteFriend(friend, $event)"
+                >
+                  删除好友
                 </NButton>
                 <NButton
                   v-if="isQqAccount && knownFriendGidSet.has(Number(friend.gid))"
@@ -1062,6 +1152,12 @@ async function handleBatchAddKnownFriendGids() {
                 </NButton>
               </div>
               <template v-else>
+                <div
+                  v-if="friendCareer[friend.gid]"
+                  class="mb-3 flex flex-wrap gap-x-5 gap-y-2 text-sm"
+                >
+                  <CareerHarvestSteal :career="friendCareer[friend.gid]" />
+                </div>
                 <div class="mb-3 border border-amber-200 rounded-xl bg-amber-50/80 p-3 dark:border-amber-800 dark:bg-amber-950/25">
                   <div v-if="interactionItemsLoading" class="flex items-center justify-center gap-2 py-2 text-sm text-amber-700 dark:text-amber-300">
                     <span class="i-svg-spinners-90-ring-with-bg" />
@@ -1091,7 +1187,7 @@ async function handleBatchAddKnownFriendGids() {
                               ? 'border-amber-500 ring-2 ring-amber-200 dark:ring-amber-800'
                               : 'border-amber-200 hover:border-amber-400 dark:border-amber-800'"
                             :aria-pressed="selectedInteractionItemId === item.itemId"
-                            @click="selectedInteractionItemId = item.itemId"
+                            @click="toggleInteractionItem(item.itemId)"
                           >
                             <img :src="item.image" alt="" class="h-8 w-8 object-contain">
                             <span>
@@ -1111,14 +1207,17 @@ async function handleBatchAddKnownFriendGids() {
                         </div>
                       </div>
                       <div class="flex shrink-0 flex-wrap gap-2 xl:max-w-72 xl:justify-end">
-                        <NButton size="small" secondary :disabled="!selectedInteractionItem || interactionUsePending" @click="selectAllInteractionLands(friend.gid)">
+                        <NButton v-if="selectedInteractionItem?.targetKind !== 'farm'" size="small" secondary :disabled="!selectedInteractionItem || interactionUsePending" @click="selectAllInteractionLands(friend.gid)">
                           全选可用
                         </NButton>
-                        <NButton size="small" secondary :disabled="selectedInteractionIds(friend.gid).length === 0 || interactionUsePending" @click="setSelectedInteractionIds(friend.gid, [])">
+                        <NButton v-if="selectedInteractionItem?.targetKind !== 'farm'" size="small" secondary :disabled="selectedInteractionIds(friend.gid).length === 0 || interactionUsePending" @click="setSelectedInteractionIds(friend.gid, [])">
                           清空
                         </NButton>
-                        <NButton type="warning" size="small" :loading="interactionUsePending" :disabled="!selectedInteractionItem || selectedInteractionIds(friend.gid).length === 0" @click="requestUseInteractionItem(friend)">
+                        <NButton v-if="selectedInteractionItem?.targetKind !== 'farm'" type="warning" size="small" :loading="interactionUsePending" :disabled="!selectedInteractionItem || selectedInteractionIds(friend.gid).length === 0" @click="requestUseInteractionItem(friend)">
                           按顺序使用 {{ selectedInteractionIds(friend.gid).length || '' }} 个
+                        </NButton>
+                        <NButton v-else type="warning" size="small" :loading="interactionUsePending" :disabled="!selectedInteractionItem || selectedInteractionItem.count < 1" @click="requestUseFarmInteractionItem(friend)">
+                          在此农场使用
                         </NButton>
                       </div>
                     </div>
@@ -1137,7 +1236,10 @@ async function handleBatchAddKnownFriendGids() {
                   </div>
                 </div>
 
-                <div v-if="!friendLands[friend.gid] || friendLands[friend.gid]?.length === 0" class="py-4 text-center text-gray-500">
+                <div v-if="selectedInteractionItem?.targetKind === 'farm'" class="py-4 text-center text-gray-500">
+                  当前道具作用于好友农场整体，无需选择地块
+                </div>
+                <div v-else-if="!friendLands[friend.gid] || friendLands[friend.gid]?.length === 0" class="py-4 text-center text-gray-500">
                   该好友当前没有可展示的土地
                 </div>
                 <div v-else class="grid grid-cols-2 gap-2 lg:grid-cols-8 md:grid-cols-5 sm:grid-cols-4">
@@ -1169,7 +1271,7 @@ async function handleBatchAddKnownFriendGids() {
       <div v-else-if="activeTab === 'blacklist'" class="space-y-4">
         <div class="farm-card rounded-2xl bg-white p-4 shadow-md dark:bg-gray-800">
           <p class="text-sm text-gray-500 dark:text-gray-400">
-            加入黑名单的好友在自动偷菜和帮助时会被跳过。
+            加入黑名单的好友在自动偷菜和帮助时会被跳过。游戏内删除好友后也会自动加入这里。
           </p>
         </div>
 

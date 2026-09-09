@@ -10,16 +10,26 @@ const {
     getPlantById,
     getSeedImageBySeedId,
     getPlantGrowTime,
+    getPlantGrowPhases,
     getItemById,
     getMutantEffectsByIds,
     getMutantDisplayPlantId,
 } = require('../../config/gameConfig');
-const { toNum, toTimeSec, getServerTimeSec, logWarn } = require('../../utils/utils');
+const { toNum, toTimeSec, getServerTimeSec, log, logWarn } = require('../../utils/utils');
+
+const MATURE_PHASE_RECORD_ID = 19;
 
 function int64String(value: any): string {
     if (value == null) return '0';
     const text = String(value?.toString?.() ?? value).trim();
     return /^-?\d+$/.test(text) ? text : '0';
+}
+
+function getLeftInorcFertTimes(plant: any): number | null {
+    if (!plant || !Object.hasOwn(plant, 'left_inorc_fert_times')) {
+        return null;
+    }
+    return toNum(plant.left_inorc_fert_times);
 }
 
 function normalizePositiveId(value: any): string {
@@ -73,8 +83,12 @@ function getPlantMutantConfigIds(plant: any, currentPhase: any = null): string[]
     return [...new Set(values.map(normalizePositiveId).filter(Boolean))];
 }
 
-// 抓包确认：黄金虫和足球由农场主通过自家 Farming 清理，好友帮助务农不能代为清理。
-const OWNER_CLEANABLE_INTERACTION_ITEM_IDS = new Set(['301101', '301102']);
+// 抓包确认：黄金虫、足球和乌云由农场主通过自家 Farming 清理，好友帮助务农不能代为清理。
+// 乌云必须以 interaction_uses / interaction_targets 的实时记录为准；field_40={8,1} 只是清理后仍保留的历史。
+const OWNER_CLEANABLE_INTERACTION_ITEM_IDS = new Set(['301101', '301102', '5006']);
+
+// 5005 青蛙是农场级事件，不绑定某一块土地；清理时通过 FarmingRequest.field 5 发送。
+const OWNER_CLEANABLE_FARM_SOCIAL_EVENT_ITEM_IDS = new Set(['5005']);
 
 const QIXI_DEW_ITEM_ID = '301103';
 const QIXI_MUTANT_CONFIG_ID = '13';
@@ -104,6 +118,35 @@ function getInteractionItemMetadata(itemId: string): { name: string; activityId:
         name: String(item?.name || `道具${itemId}`),
         activityId: toNum(item?.activity_id),
     };
+}
+
+function getCleanableFarmSocialEventItemIds(eventsOrReply: any): number[] {
+    const events: any[] = Array.isArray(eventsOrReply)
+        ? eventsOrReply
+        : (Array.isArray(eventsOrReply?.social_events) ? eventsOrReply.social_events : []);
+    return [...new Set(events
+        .map((event: any) => normalizePositiveId(event?.item_id))
+        .filter((itemId: string) => OWNER_CLEANABLE_FARM_SOCIAL_EVENT_ITEM_IDS.has(itemId))
+        .map((itemId: string) => Number(itemId)))];
+}
+
+function buildFarmSocialEventDetails(eventsOrReply: any): any[] {
+    const events: any[] = Array.isArray(eventsOrReply)
+        ? eventsOrReply
+        : (Array.isArray(eventsOrReply?.social_events) ? eventsOrReply.social_events : []);
+    return events.map((event: any) => {
+        const itemId = normalizePositiveId(event?.item_id);
+        if (!itemId) return null;
+        const metadata = getInteractionItemMetadata(itemId);
+        return {
+            itemId,
+            itemName: metadata.name,
+            activityId: metadata.activityId,
+            visitorGid: normalizePositiveId(event?.visitor_gid),
+            occurredAt: int64String(event?.timestamp),
+            cleanable: OWNER_CLEANABLE_FARM_SOCIAL_EVENT_ITEM_IDS.has(itemId),
+        };
+    }).filter(Boolean);
 }
 
 function hasOwnerCleanableInteraction(plant: any): boolean {
@@ -215,6 +258,11 @@ function buildLandDetail(land: any, options: { friendMode?: boolean; landsMap?: 
     const maxLevel = toNum(land?.max_level);
     const landsLevel = toNum(land?.lands_level);
     const landSize = toNum(land?.land_size);
+    const landBuff = {
+        plantYieldBonus: toNum(land?.buff?.plant_yield_bonus),
+        plantingTimeReduction: toNum(land?.buff?.planting_time_reduction),
+        plantExpBonus: toNum(land?.buff?.plant_exp_bonus),
+    };
     const context = getDisplayLandContext(land, landsMap);
     const base: any = {
         id,
@@ -223,17 +271,22 @@ function buildLandDetail(land: any, options: { friendMode?: boolean; landsMap?: 
         maxLevel,
         landsLevel,
         landSize,
+        landBuff,
         couldUnlock: !!land?.could_unlock,
         couldUpgrade: !!land?.could_upgrade,
         occupiedByMaster: !!context.occupiedByMaster,
         masterLandId: toNum(context.masterLandId),
         occupiedLandIds: Array.isArray(context.occupiedLandIds) ? context.occupiedLandIds : [],
         plantSize: 1,
+        rarity: 0,
         mutantConfigIds: [],
         mutantEffects: [],
         isMutated: false,
+        purpleCrystalResonanceExpBonus: 0,
         interactionEffects: [],
+        needInteractionCleanup: false,
         protocolField40: null,
+        leftInorcFertTimes: null,
     };
     if (!base.unlocked) {
         return {
@@ -262,7 +315,7 @@ function buildLandDetail(land: any, options: { friendMode?: boolean; landsMap?: 
         };
     }
 
-    const currentPhase = getCurrentPhase(plant.phases, false, '');
+    const currentPhase = getCurrentPhase(plant.phases, false, '', toNum(plant.id));
     if (!currentPhase) {
         return { ...base, status: 'empty', plantName: '', phaseName: '', currentSeason: 0, totalSeason: 0 };
     }
@@ -270,6 +323,11 @@ function buildLandDetail(land: any, options: { friendMode?: boolean; landsMap?: 
     const plantId = toNum(plant.id);
     const mutantConfigIds = getPlantMutantConfigIds(plant, currentPhase);
     const mutantEffects = getMutantEffectsByIds(mutantConfigIds);
+    // 协议没有独立的“紫晶共鸣”布尔值：紫金土地由 level 标识，
+    // 是否存在加成及具体比例必须以服务端 LandInfo.buff.plant_exp_bonus 为准。
+    const purpleCrystalResonanceExpBonus = level === 5 && mutantConfigIds.length > 0
+        ? Math.max(0, landBuff.plantExpBonus)
+        : 0;
     const displayPlantId = getMutantDisplayPlantId(plantId, mutantConfigIds);
     const plantName = getPlantName(displayPlantId) || getPlantName(plantId) || plant.name || '未知';
     const plantCfg = getPlantById(plantId);
@@ -278,7 +336,11 @@ function buildLandDetail(land: any, options: { friendMode?: boolean; landsMap?: 
     const totalSeason = Math.max(1, toNum(plantCfg?.seasons) || 1);
     const currentSeasonRaw = toNum(plant.season);
     const currentSeason = currentSeasonRaw > 0 ? Math.min(currentSeasonRaw, totalSeason) : 1;
-    const maturePhase = plant.phases.find((phase: any) => toNum(phase?.phase) === PlantPhase.MATURE);
+    const maturePhase = Array.isArray(plant.phases)
+        ? plant.phases
+            .filter((phase: any) => phase && toTimeSec(phase.begin_time) > 0)
+            .sort((left: any, right: any) => toTimeSec(right.begin_time) - toTimeSec(left.begin_time))[0]
+        : null;
     const matureBegin = maturePhase ? toTimeSec(maturePhase.begin_time) : 0;
     const matureInSec = matureBegin > nowSec ? matureBegin - nowSec : 0;
     const statusFlags = getPlantStatusFlags(plant, currentPhase, nowSec);
@@ -300,7 +362,7 @@ function buildLandDetail(land: any, options: { friendMode?: boolean; landsMap?: 
         plantName,
         seedId,
         seedImage: seedId > 0 ? getSeedImageBySeedId(seedId) : '',
-        phaseName: PHASE_NAMES[phaseVal] || '',
+        phaseName: currentPhase.phaseName || PHASE_NAMES[phaseVal] || '',
         currentSeason,
         totalSeason,
         matureInSec,
@@ -310,45 +372,99 @@ function buildLandDetail(land: any, options: { friendMode?: boolean; landsMap?: 
         needBug: statusFlags.needBug,
         stealable: !!plant.stealable,
         plantSize,
+        rarity: toNum(plant?.rarity ?? plant?.rare_level ?? plant?.rarity_level),
         mutantConfigIds,
         mutantEffects,
         isMutated: mutantConfigIds.length > 0,
+        purpleCrystalResonanceExpBonus,
         interactionEffects: getPlantInteractionEffects(plant),
+        needInteractionCleanup: hasOwnerCleanableInteraction(plant),
         protocolField40: protocolField40.length > 0 ? protocolField40 : null,
+        leftInorcFertTimes: getLeftInorcFertTimes(plant),
     };
 }
 
-function getCurrentPhase(phases: any[], debug?: boolean, landLabel?: string): any | null {
+function getCurrentPhase(phases: any[], debug?: boolean, landLabel?: string, plantId: number = 0): any | null {
     if (!phases || phases.length === 0) return null;
 
     const nowSec: number = getServerTimeSec();
+    const resolvedPlantId = toNum(plantId);
 
     if (debug) {
         console.warn(`    ${landLabel} 服务器时间=${nowSec} (${new Date(nowSec * 1000).toLocaleTimeString()})`);
+        const growPhases = getPlantGrowPhases(resolvedPlantId);
         for (let i = 0; i < phases.length; i++) {
             const p = phases[i];
             const bt = toTimeSec(p.begin_time);
-            const phaseName = PHASE_NAMES[p.phase] || `阶段${p.phase}`;
+            const phaseName = growPhases[toNum(p.phase) - 1]?.name
+                || PHASE_NAMES[toNum(p.phase)]
+                || `阶段${p.phase}`;
             const diff = bt > 0 ? (bt - nowSec) : 0;
             const diffStr = diff > 0 ? `(未来 ${diff}s)` : diff < 0 ? `(已过 ${-diff}s)` : '';
             console.warn(`    ${landLabel}   [${i}] ${phaseName}(${p.phase}) begin=${bt} ${diffStr} dry=${toTimeSec(p.dry_time)} weed=${toTimeSec(p.weeds_time)} insect=${toTimeSec(p.insect_time)}`);
         }
     }
 
-    for (let i = phases.length - 1; i >= 0; i--) {
-        const beginTime = toTimeSec(phases[i].begin_time);
-        if (beginTime > 0 && beginTime <= nowSec) {
-            if (debug) {
-                console.warn(`    ${landLabel}   → 当前阶段: ${PHASE_NAMES[phases[i].phase] || phases[i].phase}`);
-            }
-            return phases[i];
-        }
-    }
-
+    const converted = convertServerPhaseToClient(phases, phases[0], resolvedPlantId);
     if (debug) {
-        console.warn(`    ${landLabel}   → 所有阶段都在未来，使用第一个: ${PHASE_NAMES[phases[0].phase] || phases[0].phase}`);
+        console.warn(`    ${landLabel}   → 当前阶段: ${converted?.phaseName || PHASE_NAMES[converted?.phase] || converted?.phase}`);
     }
-    return phases[0];
+    return converted;
+}
+
+/**
+ * phases 是从当前阶段开始的配置后缀，因此当前配置下标等于：
+ * grow_phases 总数 - 服务端剩余 phases 数。响应 phase 只表示生长中/成熟/枯死
+ * 等粗状态，phase_id 是详细阶段类型，二者都不能直接作为配置数组下标。
+ */
+function convertServerPhaseToClient(phases: any[], serverPhaseInfo: any, plantId: number): any | null {
+    if (!serverPhaseInfo) return null;
+    const serverPhase = toNum(serverPhaseInfo.phase);
+    const phaseRecordId = toNum(serverPhaseInfo.phase_id);
+    const growPhases = getPlantGrowPhases(plantId);
+    const remainingCount = Array.isArray(phases) ? phases.length : 0;
+    const phaseIndex = growPhases.length > 0 && remainingCount > 0
+        ? Math.max(0, growPhases.length - remainingCount)
+        : -1;
+    const configuredPhase = phaseIndex >= 0 ? growPhases[phaseIndex] : null;
+    const isFinalConfiguredPhase = growPhases.length > 0 && phaseIndex === growPhases.length - 1;
+    // 大多数作物成熟时 phase=6，但部分作物（例如最后阶段名为“盛开”的牵牛花）
+    // 仍可能返回粗状态 2，或把详细阶段 ID 19 放进 phase。成熟阶段同时可由
+    // phase_id=19 和 grow_phases 的最后一个剩余阶段确定，不能只依赖粗状态。
+    const isMature = serverPhase !== PlantPhase.DEAD && (
+        serverPhase === PlantPhase.MATURE
+        || serverPhase === MATURE_PHASE_RECORD_ID
+        || phaseRecordId === MATURE_PHASE_RECORD_ID
+        || (isFinalConfiguredPhase && (
+            serverPhase === PlantPhase.GERMINATION
+            || serverPhase > PlantPhase.DEAD
+        ))
+    );
+    const clientPhase = isMature ? PlantPhase.MATURE : serverPhase;
+    const imagePhase = serverPhase === PlantPhase.DEAD ? PlantPhase.DEAD : phaseIndex + 1;
+    const isKnownClientPhase = clientPhase >= PlantPhase.SEED && clientPhase <= PlantPhase.MATURE;
+    if (!configuredPhase && serverPhase !== PlantPhase.DEAD && !isKnownClientPhase) {
+        return {
+            ...serverPhaseInfo,
+            phase_index: phaseIndex,
+            image_phase: 0,
+            server_phase: serverPhase,
+            phase_record_id: phaseRecordId,
+            phase: PlantPhase.UNKNOWN,
+            phaseName: '未知阶段',
+        };
+    }
+    return {
+        ...serverPhaseInfo,
+        phase_index: phaseIndex,
+        image_phase: configuredPhase ? imagePhase : clientPhase,
+        server_phase: serverPhase,
+        phase_record_id: phaseRecordId,
+        phase: clientPhase,
+        phaseName: serverPhase === PlantPhase.DEAD
+            ? PHASE_NAMES[PlantPhase.DEAD]
+            : (configuredPhase && configuredPhase.name) || PHASE_NAMES[clientPhase],
+    };
 }
 
 function getOrganicFertilizerTargetsFromLands(lands: any[]): number[] {
@@ -361,12 +477,12 @@ function getOrganicFertilizerTargetsFromLands(lands: any[]): number[] {
 
         const plant = land.plant;
         if (!plant || !plant.phases || plant.phases.length === 0) continue;
-        const currentPhase = getCurrentPhase(plant.phases);
+        const currentPhase = getCurrentPhase(plant.phases, false, '', toNum(plant.id));
         if (!currentPhase) continue;
         if (currentPhase.phase === PlantPhase.DEAD) continue;
 
         // 服务端有该字段时，<=0 说明该地当前不能再施有机肥
-        if (Object.prototype.hasOwnProperty.call(plant, 'left_inorc_fert_times')) {
+        if (Object.hasOwn(plant, 'left_inorc_fert_times')) {
             const leftTimes = toNum(plant.left_inorc_fert_times);
             if (leftTimes <= 0) continue;
         }
@@ -389,12 +505,14 @@ function getFastMatureLands(lands: any[], thresholdSec: number = 300): number[] 
 
         const plant = land.plant;
         if (!plant || !plant.phases || plant.phases.length === 0) continue;
-        const currentPhase = getCurrentPhase(plant.phases);
+        const currentPhase = getCurrentPhase(plant.phases, false, '', toNum(plant.id));
         if (!currentPhase) continue;
         if (currentPhase.phase === PlantPhase.DEAD) continue;
         if (currentPhase.phase === PlantPhase.MATURE) continue;
 
-        const maturePhase = plant.phases.find((p: any) => toNum(p.phase) === PlantPhase.MATURE);
+        const maturePhase = plant.phases
+            .filter((p: any) => p && toTimeSec(p.begin_time) > 0)
+            .sort((left: any, right: any) => toTimeSec(right.begin_time) - toTimeSec(left.begin_time))[0];
         if (!maturePhase) continue;
 
         const matureBeginTime = toTimeSec(maturePhase.begin_time);
@@ -403,7 +521,7 @@ function getFastMatureLands(lands: any[], thresholdSec: number = 300): number[] 
         const timeToMature = matureBeginTime - nowSec;
 
         if (timeToMature <= threshold && timeToMature >= 0) {
-            if (Object.prototype.hasOwnProperty.call(plant, 'left_inorc_fert_times')) {
+            if (Object.hasOwn(plant, 'left_inorc_fert_times')) {
                 const leftTimes = toNum(plant.left_inorc_fert_times);
                 if (leftTimes <= 0) continue;
             }
@@ -631,7 +749,7 @@ function analyzeLands(lands: any[], debug?: boolean, ownGid?: number): {
         const plantName = plant.name || '未知作物';
         const landLabel = `土地#${id}(${plantName})`;
 
-        const currentPhase = getCurrentPhase(plant.phases, debug, landLabel);
+        const currentPhase = getCurrentPhase(plant.phases, debug, landLabel, toNum(plant.id));
         if (!currentPhase) {
             result.empty.push(id);
             continue;
@@ -816,7 +934,7 @@ function getLandLifecycleState(land: any): string {
         return 'empty';
     }
 
-    const currentPhase = getCurrentPhase(plant.phases, false, '');
+    const currentPhase = getCurrentPhase(plant.phases, false, '', toNum(plant.id));
     if (!currentPhase) return 'empty';
 
     const phaseVal = toNum(currentPhase.phase);
@@ -824,6 +942,16 @@ function getLandLifecycleState(land: any): string {
     if (phaseVal === PlantPhase.UNKNOWN) return 'empty';
     if (phaseVal >= PlantPhase.SEED && phaseVal <= PlantPhase.MATURE) return 'growing';
     return 'unknown';
+}
+
+function hasRemainingSeasons(plant: any): boolean {
+    if (!plant) return false;
+    const plantId = toNum(plant.id);
+    const plantCfg = plantId > 0 ? getPlantById(plantId) : null;
+    const totalSeason = Math.max(1, toNum(plantCfg && plantCfg.seasons) || 1);
+    const rawSeason = toNum(plant.season);
+    const currentSeason = rawSeason > 0 ? rawSeason : 1;
+    return currentSeason > 1 || currentSeason < totalSeason;
 }
 
 function classifyHarvestedLandsByMap(landIds: number[], landsMap: Map<number, any>): {
@@ -834,22 +962,47 @@ function classifyHarvestedLandsByMap(landIds: number[], landsMap: Map<number, an
     const removable: number[] = [];
     const growing: number[] = [];
     const unknown: number[] = [];
+    const details: Array<Record<string, unknown>> = [];
     for (const id of landIds) {
         const land = landsMap.get(id);
+        const plant = land && land.plant;
+        const phases = plant && Array.isArray(plant.phases) ? plant.phases : [];
+        const firstPhase = phases[0] || null;
+        let state = 'unknown';
         if (!land) {
             unknown.push(id);
-            continue;
+        } else {
+            state = getLandLifecycleState(land);
+            if (state === 'dead' || state === 'empty') {
+                removable.push(id);
+            } else if (state === 'growing' || hasRemainingSeasons(plant)) {
+                state = 'growing';
+                growing.push(id);
+            } else {
+                unknown.push(id);
+            }
         }
-        const state = getLandLifecycleState(land);
-        if (state === 'dead' || state === 'empty') {
-            removable.push(id);
-            continue;
-        }
-        if (state === 'growing') {
-            growing.push(id);
-            continue;
-        }
-        unknown.push(id);
+        details.push({
+            landId: id,
+            hasLand: !!land,
+            hasPlant: !!plant,
+            phases: phases.length,
+            phase: firstPhase ? toNum(firstPhase.phase) : 0,
+            phaseId: firstPhase ? toNum(firstPhase.phase_id) : 0,
+            season: plant ? toNum(plant.season) : 0,
+            state,
+        });
+    }
+    if (landIds.length > 0) {
+        log('农场', `收后分类 ${landIds.length} 块: 铲${removable.length}/长${growing.length}/未知${unknown.length}`, {
+            module: 'farm',
+            event: '收获后状态分类',
+            result: 'ok',
+            removable: [...removable],
+            growing: [...growing],
+            unknown: [...unknown],
+            details,
+        });
     }
     return { removable, growing, unknown };
 }
@@ -891,8 +1044,14 @@ async function resolveRemovableHarvestedLands(harvestedLandIds: number[], harves
     }
 
     if (unknown.length > 0) {
-        // 按兼容策略：不可判定时保持旧行为，继续铲除
-        removable.push(...unknown);
+        // 收获响应可能省略 2x2 主地块，或全量土地响应暂时不完整；
+        // 把未知状态当成枯死会误铲仍在生长/进入下一季的合种作物。
+        logWarn('农场', `收后仍有 ${unknown.length} 块土地状态未知，已跳过铲除 (${unknown.join(',')})`, {
+            module: 'farm',
+            event: '收获后状态补拉',
+            result: 'skip_unknown',
+            landIds: unknown,
+        });
         fallbackRemoved = unknown.length;
     }
 
@@ -910,6 +1069,8 @@ module.exports = {
     getExtendedStatusInteractionItemId,
     getPlantInteractionEffects,
     hasOwnerCleanableInteraction,
+    getCleanableFarmSocialEventItemIds,
+    buildFarmSocialEventDetails,
     buildLandDetail,
     getOrganicFertilizerTargetsFromLands,
     getFastMatureLands,
@@ -921,6 +1082,7 @@ module.exports = {
     buildSlaveToMasterMap,
     isOccupiedSlaveLandWithMap,
     summarizeLandDetails,
+    ALL_FERTILIZER_LAND_TYPES,
     getLandTypeByLevel,
     normalizeFertilizerLandTypes,
     filterLandIdsByTypes,

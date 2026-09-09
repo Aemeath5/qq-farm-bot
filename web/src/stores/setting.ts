@@ -1,12 +1,13 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import api from '@/api'
+import api, { getApiErrorMessage } from '@/api'
 
 export interface AutomationConfig {
   farm?: boolean
   farm_push?: boolean
   land_upgrade?: boolean
   friend?: boolean
+  friend_auto_accept?: boolean
   task?: boolean
   sell?: boolean
   fertilizer?: string
@@ -17,10 +18,19 @@ export interface AutomationConfig {
   friend_help?: boolean
   friend_bad?: boolean
   friend_help_exp_limit?: boolean
+  friend_help_protect_dog_ignore_exp_limit?: boolean
   fertilizer_gift?: boolean
   fertilizer_buy_organic?: boolean
   fertilizer_buy_normal?: boolean
+  mystery_shop_auto_buy?: boolean
+  mystery_shop_allow_gold?: boolean
+  mystery_shop_allow_coupon?: boolean
+  mystery_shop_allow_gold_bean?: boolean
+  mystery_shop_allow_diamond?: boolean
+  mystery_shop_arrival_notify?: boolean
+  mystery_shop_purchase_notify?: boolean
   skip_own_weed_bug?: boolean
+  show_manual_fertilizer?: boolean
 }
 
 export interface IntervalsConfig {
@@ -61,6 +71,7 @@ export interface SettingsState {
   plantingStrategy: string
   preferredSeedId: number
   bagSeedPriority: number[]
+  bagSeedLandTypes: Record<string, string[]>
   bagSeedFallbackStrategy: string
   intervals: IntervalsConfig
   friendQuietHours: FriendQuietHoursConfig
@@ -75,12 +86,18 @@ export interface SettingsState {
   fertilizerBuyNormalCount: number
   fertilizerBuyNormalThresholdHours: number
   fertilizerBuyCheckIntervalMinutes: number
+  autoAcceptFriendMinLevel: number
+  autoAcceptRequireOwnLevel: boolean
+  autoAcceptHarvestStealEnabled: boolean
+  autoAcceptHarvestStealHarvest: number
+  autoAcceptHarvestStealSteal: number
 }
 
 type SaveableSettingsKey
   = | 'plantingStrategy'
     | 'preferredSeedId'
     | 'bagSeedPriority'
+    | 'bagSeedLandTypes'
     | 'bagSeedFallbackStrategy'
     | 'intervals'
     | 'friendQuietHours'
@@ -93,6 +110,11 @@ type SaveableSettingsKey
     | 'fertilizerBuyNormalCount'
     | 'fertilizerBuyNormalThresholdHours'
     | 'fertilizerBuyCheckIntervalMinutes'
+    | 'autoAcceptFriendMinLevel'
+    | 'autoAcceptRequireOwnLevel'
+    | 'autoAcceptHarvestStealEnabled'
+    | 'autoAcceptHarvestStealHarvest'
+    | 'autoAcceptHarvestStealSteal'
 
 export type SettingsSavePayload = Partial<Pick<SettingsState, SaveableSettingsKey>>
 
@@ -100,6 +122,7 @@ const SAVEABLE_SETTINGS_KEYS: SaveableSettingsKey[] = [
   'plantingStrategy',
   'preferredSeedId',
   'bagSeedPriority',
+  'bagSeedLandTypes',
   'bagSeedFallbackStrategy',
   'intervals',
   'friendQuietHours',
@@ -112,6 +135,11 @@ const SAVEABLE_SETTINGS_KEYS: SaveableSettingsKey[] = [
   'fertilizerBuyNormalCount',
   'fertilizerBuyNormalThresholdHours',
   'fertilizerBuyCheckIntervalMinutes',
+  'autoAcceptFriendMinLevel',
+  'autoAcceptRequireOwnLevel',
+  'autoAcceptHarvestStealEnabled',
+  'autoAcceptHarvestStealHarvest',
+  'autoAcceptHarvestStealSteal',
 ]
 
 function createDefaultSettings(): SettingsState {
@@ -119,6 +147,7 @@ function createDefaultSettings(): SettingsState {
     plantingStrategy: 'max_exp',
     preferredSeedId: 0,
     bagSeedPriority: [],
+    bagSeedLandTypes: {},
     bagSeedFallbackStrategy: 'level',
     intervals: {},
     friendQuietHours: { enabled: false, start: '23:00', end: '07:00', continueFarm: true },
@@ -141,6 +170,11 @@ function createDefaultSettings(): SettingsState {
     fertilizerBuyNormalCount: 10,
     fertilizerBuyNormalThresholdHours: 10,
     fertilizerBuyCheckIntervalMinutes: 30,
+    autoAcceptFriendMinLevel: 0,
+    autoAcceptRequireOwnLevel: false,
+    autoAcceptHarvestStealEnabled: true,
+    autoAcceptHarvestStealHarvest: 8,
+    autoAcceptHarvestStealSteal: 1,
   }
 }
 
@@ -174,6 +208,7 @@ export const useSettingStore = defineStore('setting', () => {
       plantingStrategy: data.strategy || defaults.plantingStrategy,
       preferredSeedId: data.preferredSeed || defaults.preferredSeedId,
       bagSeedPriority: cloneValue(data.bagSeedPriority ?? defaults.bagSeedPriority),
+      bagSeedLandTypes: cloneValue(data.bagSeedLandTypes ?? defaults.bagSeedLandTypes),
       bagSeedFallbackStrategy: data.bagSeedFallbackStrategy ?? defaults.bagSeedFallbackStrategy,
       intervals: cloneValue(data.intervals || defaults.intervals),
       friendQuietHours: {
@@ -194,6 +229,11 @@ export const useSettingStore = defineStore('setting', () => {
       fertilizerBuyNormalCount: data.fertilizerBuyNormalCount ?? defaults.fertilizerBuyNormalCount,
       fertilizerBuyNormalThresholdHours: data.fertilizerBuyNormalThresholdHours ?? defaults.fertilizerBuyNormalThresholdHours,
       fertilizerBuyCheckIntervalMinutes: data.fertilizerBuyCheckIntervalMinutes ?? defaults.fertilizerBuyCheckIntervalMinutes,
+      autoAcceptFriendMinLevel: data.autoAcceptFriendMinLevel ?? defaults.autoAcceptFriendMinLevel,
+      autoAcceptRequireOwnLevel: data.autoAcceptRequireOwnLevel ?? defaults.autoAcceptRequireOwnLevel,
+      autoAcceptHarvestStealEnabled: data.autoAcceptHarvestStealEnabled ?? defaults.autoAcceptHarvestStealEnabled,
+      autoAcceptHarvestStealHarvest: data.autoAcceptHarvestStealHarvest ?? defaults.autoAcceptHarvestStealHarvest,
+      autoAcceptHarvestStealSteal: data.autoAcceptHarvestStealSteal ?? defaults.autoAcceptHarvestStealSteal,
     }
   }
 
@@ -266,7 +306,7 @@ export const useSettingStore = defineStore('setting', () => {
           saved: !!data?.saved,
           unconfirmed: !!data?.unconfirmed,
           data: data?.data,
-          error: data?.error || '保存失败',
+          error: getApiErrorMessage(data, '保存失败'),
         }
       }
 
@@ -277,7 +317,7 @@ export const useSettingStore = defineStore('setting', () => {
       return { ok: true, data: data.data }
     }
     catch (error: any) {
-      return { ok: false, error: error?.response?.data?.error || error?.message || '保存失败' }
+      return { ok: false, error: getApiErrorMessage(error, '保存失败') }
     }
     finally {
       endRequest()
@@ -295,7 +335,7 @@ export const useSettingStore = defineStore('setting', () => {
       return { ok: false, error: '保存失败' }
     }
     catch (error: any) {
-      return { ok: false, error: error?.response?.data?.error || error?.message || '保存失败' }
+      return { ok: false, error: getApiErrorMessage(error, '保存失败') }
     }
     finally {
       endRequest()

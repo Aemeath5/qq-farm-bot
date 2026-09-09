@@ -27,7 +27,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const data = ctx.provider.getAccounts();
             res.json({ ok: true, data });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -57,7 +57,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             }
             res.json({ ok: true, data });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -66,6 +66,9 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const rawBody = (req.body && typeof req.body === 'object') ? req.body : {};
             const requestedName = typeof rawBody.name === 'string' ? rawBody.name.trim() : '';
             const body = typeof rawBody.name === 'string' ? { ...rawBody, name: requestedName } : rawBody;
+            if (!requestedName) {
+                return res.status(400).json({ ok: false, error: '账号备注不能为空' });
+            }
             const visibleAccounts = getAccountList(ctx);
             const remarkMatchedAccount = !body.id && requestedName
                 ? visibleAccounts.find((account: any) => String(account.name || '').trim() === requestedName)
@@ -98,7 +101,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
             const data = addOrUpdateAccount(payload);
             if (ctx.provider.addAccountLog) {
-                const accountId = isUpdate ? String(payload.id) : String((data.accounts[data.accounts.length - 1] || {}).id || '');
+                const accountId = isUpdate ? String(payload.id) : String((data.accounts.at(-1) || {}).id || '');
                 const accountName = payload.name || '';
                 ctx.provider.addAccountLog(
                     isUpdate ? 'update' : 'add',
@@ -111,7 +114,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             }
             // 如果是新增，自动启动
             if (!isUpdate) {
-                const newAcc = data.accounts[data.accounts.length - 1];
+                const newAcc = data.accounts.at(-1);
                 if (newAcc) ctx.provider.startAccount(newAcc.id);
             } else if (isRemarkRelogin) {
                 // Adding with an existing remark is a relogin operation, including for stopped accounts.
@@ -122,7 +125,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             }
             res.json({ ok: true, data });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -139,7 +142,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             }
             res.json({ ok: true, data });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -153,7 +156,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             // 与当前 web 前端保持一致：直接返回数组
             res.json(list);
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -255,7 +258,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
                 data: data || {},
             });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -266,7 +269,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const data = await ctx.provider.setUITheme(theme);
             res.json({ ok: true, data: data || {} });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -286,7 +289,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const data = store.setOfflineReminder ? store.setOfflineReminder(body) : {};
             res.json({ ok: true, data: data || {} });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -344,7 +347,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             }
             return res.json({ ok: true, data: ret, message: ret.msg || '推送成功' });
         } catch (e: any) {
-            return res.status(500).json({ ok: false, error: e.message });
+            return handleApiError(res, e);
         }
     });
 
@@ -367,14 +370,20 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const fertilizerBuyNormalThresholdHours = id && (typeof store.getFertilizerBuyNormalThresholdHours === 'function') ? store.getFertilizerBuyNormalThresholdHours(id) : 10;
             const fertilizerBuyCheckIntervalMinutes = id && (typeof store.getFertilizerBuyCheckIntervalMinutes === 'function') ? store.getFertilizerBuyCheckIntervalMinutes(id) : 30;
             const bagSeedPriority = id && (typeof store.getBagSeedPriority === 'function') ? store.getBagSeedPriority(id) : [];
+            const bagSeedLandTypes = id && (typeof store.getBagSeedLandTypes === 'function') ? store.getBagSeedLandTypes(id) : {};
             const bagSeedFallbackStrategy = id && (typeof store.getBagSeedFallbackStrategy === 'function') ? store.getBagSeedFallbackStrategy(id) : 'level';
+            const autoAcceptFriendMinLevel = id && (typeof store.getAutoAcceptFriendMinLevel === 'function') ? store.getAutoAcceptFriendMinLevel(id) : 0;
+            const autoAcceptRequireOwnLevel = id && (typeof store.getAutoAcceptRequireOwnLevel === 'function') ? store.getAutoAcceptRequireOwnLevel(id) : false;
+            const autoAcceptHarvestStealEnabled = id && (typeof store.getAutoAcceptHarvestStealEnabled === 'function') ? store.getAutoAcceptHarvestStealEnabled(id) : true;
+            const autoAcceptHarvestStealHarvest = id && (typeof store.getAutoAcceptHarvestStealHarvest === 'function') ? store.getAutoAcceptHarvestStealHarvest(id) : 8;
+            const autoAcceptHarvestStealSteal = id && (typeof store.getAutoAcceptHarvestStealSteal === 'function') ? store.getAutoAcceptHarvestStealSteal(id) : 1;
             const ui = store.getUI();
             const offlineReminder = store.getOfflineReminder
                 ? store.getOfflineReminder()
                 : { channel: 'webhook', endpoint: '', token: '', secret: '', title: '账号下线提醒', msg: '账号下线', offlineDeleteSec: 0 };
-            res.json({ ok: true, data: { intervals, strategy, preferredSeed, friendQuietHours, automation, stealDelaySeconds, plantOrderRandom, plantDelaySeconds, fertilizerBuyOrganicCount, fertilizerBuyOrganicThresholdHours, fertilizerBuyNormalCount, fertilizerBuyNormalThresholdHours, fertilizerBuyCheckIntervalMinutes, bagSeedPriority, bagSeedFallbackStrategy, ui, offlineReminder } });
+            res.json({ ok: true, data: { intervals, strategy, preferredSeed, friendQuietHours, automation, stealDelaySeconds, plantOrderRandom, plantDelaySeconds, fertilizerBuyOrganicCount, fertilizerBuyOrganicThresholdHours, fertilizerBuyNormalCount, fertilizerBuyNormalThresholdHours, fertilizerBuyCheckIntervalMinutes, bagSeedPriority, bagSeedLandTypes, bagSeedFallbackStrategy, autoAcceptFriendMinLevel, autoAcceptRequireOwnLevel, autoAcceptHarvestStealEnabled, autoAcceptHarvestStealHarvest, autoAcceptHarvestStealSteal, ui, offlineReminder } });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -387,7 +396,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             }
             res.json({ ok: true, data: defaultConfig });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -395,7 +404,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         try {
             res.json({ ok: true, data: getDevicePresets() });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -408,38 +417,99 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
                     default: getDefaultSystemConfig(),
                     current: getRuntimeConfig(),
                     timeZones: getTimeZoneOptions(),
+                    loginSettings: store.getLoginSettings
+                        ? store.getLoginSettings()
+                        : { wechatQrLogin: true, qqQrLogin: false, napCatEndpoint: '', napCatSignature: '' },
                 },
             });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
+        }
+    });
+
+    app.get('/api/settings/login-config', (_req: Request, res: Response) => {
+        try {
+            const loginSettings = store.getLoginSettings
+                ? store.getLoginSettings()
+                : { wechatQrLogin: true, qqQrLogin: false, napCatEndpoint: '', napCatSignature: '' };
+            res.json({ ok: true, data: loginSettings });
+        } catch (e: any) {
+            handleApiError(res, e);
+        }
+    });
+
+    app.post('/api/settings/login-config', (req: Request, res: Response) => {
+        try {
+            const body = (req.body && typeof req.body === 'object') ? req.body : {};
+            const loginSettings = store.setLoginSettings
+                ? store.setLoginSettings({
+                    wechatQrLogin: body.wechatQrLogin,
+                    qqQrLogin: body.qqQrLogin,
+                    napCatEndpoint: body.napCatEndpoint,
+                    napCatSignature: body.napCatSignature,
+                })
+                : { wechatQrLogin: true, qqQrLogin: false, napCatEndpoint: '', napCatSignature: '' };
+            res.json({ ok: true, data: loginSettings });
+        } catch (e: any) {
+            handleApiError(res, e);
         }
     });
 
     app.post('/api/settings/system-config', (req: Request, res: Response) => {
         try {
             const { serverUrl, clientVersion, platform, os, timeZone, deviceInfo } = req.body || {};
+            const previous = getRuntimeConfig();
             const saved = store.setSystemConfig({ serverUrl, clientVersion, platform, os, timeZone, deviceInfo });
             updateRuntimeConfig(saved);
             if (ctx.provider && typeof ctx.provider.broadcastConfig === 'function') {
                 ctx.provider.broadcastConfig('');
             }
+            const transportChanged = previous.serverUrl !== saved.serverUrl
+                || previous.clientVersion !== saved.clientVersion
+                || previous.platform !== saved.platform
+                || previous.os !== saved.os;
+            if (transportChanged && ctx.provider && typeof ctx.provider.getAccounts === 'function'
+                && typeof ctx.provider.isAccountRunning === 'function'
+                && typeof ctx.provider.restartAccount === 'function') {
+                const accounts = ctx.provider.getAccounts()?.accounts || [];
+                for (const account of accounts) {
+                    if (account?.id && ctx.provider.isAccountRunning(account.id)) {
+                        ctx.provider.restartAccount(account.id);
+                    }
+                }
+            }
             res.json({ ok: true, data: { saved, current: getRuntimeConfig() } });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
     app.post('/api/settings/system-config/reset', (_req: Request, res: Response) => {
         try {
+            const previous = getRuntimeConfig();
             const saved = getDefaultSystemConfig();
             store.setSystemConfig(saved);
             updateRuntimeConfig(saved);
             if (ctx.provider && typeof ctx.provider.broadcastConfig === 'function') {
                 ctx.provider.broadcastConfig('');
             }
+            const transportChanged = previous.serverUrl !== saved.serverUrl
+                || previous.clientVersion !== saved.clientVersion
+                || previous.platform !== saved.platform
+                || previous.os !== saved.os;
+            if (transportChanged && ctx.provider && typeof ctx.provider.getAccounts === 'function'
+                && typeof ctx.provider.isAccountRunning === 'function'
+                && typeof ctx.provider.restartAccount === 'function') {
+                const accounts = ctx.provider.getAccounts()?.accounts || [];
+                for (const account of accounts) {
+                    if (account?.id && ctx.provider.isAccountRunning(account.id)) {
+                        ctx.provider.restartAccount(account.id);
+                    }
+                }
+            }
             res.json({ ok: true, data: { saved, current: getRuntimeConfig() } });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 }

@@ -34,7 +34,7 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             }
             res.json({ ok: true, data });
         } catch (e: any) {
-            res.json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -63,7 +63,7 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             }
             res.json({ ok: true, data: lastData || {} });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -79,7 +79,7 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             const bought = await ctx.provider.buyFertilizer(id, type, count);
             res.json({ ok: true, bought });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -108,7 +108,7 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             });
             res.json({ ok: true, ...result });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -495,7 +495,7 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             }
             res.json({ ok: true });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
@@ -510,7 +510,20 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             }
             res.json({ ok: true });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
+        }
+    });
+
+    // API: 对自己农场的指定地块手动施一次化肥。
+    app.post('/api/farm/fertilize', async (req: Request, res: Response) => {
+        const id = getAccId(ctx, req);
+        if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
+
+        try {
+            const data = await ctx.provider.fertilizeOwnLand(id, req.body?.landId, req.body?.fertilizerType);
+            res.json({ ok: true, data });
+        } catch (e: any) {
+            handleApiError(res, e);
         }
     });
 
@@ -520,9 +533,9 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         if (!id) return res.status(400).json({ ok: false });
 
         try {
-            const { opType } = req.body; // 'harvest', 'clear', 'plant', 'all'
-            await ctx.provider.doFarmOp(id, opType);
-            res.json({ ok: true });
+            const { opType, landId } = req.body; // 'harvest', 'clear', 'plant', 'all'; landId 用于单点务农
+            const data = await ctx.provider.doFarmOp(id, opType, landId);
+            res.json({ ok: true, data });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -536,7 +549,7 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             const data = getPlantRankings(sortBy);
             res.json({ ok: true, data });
         } catch (e: any) {
-            res.status(500).json({ ok: false, error: e.message });
+            handleApiError(res, e);
         }
     });
 
