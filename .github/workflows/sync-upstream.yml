@@ -1,6 +1,6 @@
 name: Sync upstream master
 
-# Manual sync trigger: 2026-09-11
+# Manual sync trigger: 2026-09-12
 on:
   workflow_dispatch:
   push:
