@@ -60,6 +60,8 @@ async function loadProto(): Promise<void> {
     types.GateMeta = root.lookupType('gatepb.Meta');
     types.EventMessage = root.lookupType('gatepb.EventMessage');
 
+    types.AutumnOperateRequest = root.lookupType('gamepb.activitypb.AutumnOperateRequest');
+
     // 用户
     types.LoginRequest = root.lookupType('gamepb.userpb.LoginRequest');
     types.LoginReply = root.lookupType('gamepb.userpb.LoginReply');
@@ -300,6 +302,8 @@ async function loadProto(): Promise<void> {
     // 狗狗
     types.GetDogInfoRequest = root.lookupType('gamepb.dogpb.GetDogInfoRequest');
     types.GetDogInfoReply = root.lookupType('gamepb.dogpb.GetDogInfoReply');
+    types.ActivateDogRequest = root.lookupType('gamepb.dogpb.ActivateDogRequest');
+    types.ActivateDogReply = root.lookupType('gamepb.dogpb.ActivateDogReply');
     types.DeployDogRequest = root.lookupType('gamepb.dogpb.DeployDogRequest');
     types.DeployDogReply = root.lookupType('gamepb.dogpb.DeployDogReply');
     types.WithdrawDogRequest = root.lookupType('gamepb.dogpb.WithdrawDogRequest');
