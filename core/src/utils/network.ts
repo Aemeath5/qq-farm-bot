@@ -3,9 +3,11 @@ const { Buffer } = require('node:buffer');
 const { EventEmitter } = require('node:events');
 const WebSocket = require('ws');
 const { CONFIG } = require('../config/config');
+const { getClientVersion, getLoginDeviceInfo, isWechatPlatform } = require('./client-profile');
 const { createScheduler } = require('../services/scheduler');
 const { updateStatusFromLogin, updateStatusGold, updateStatusLevel } = require('../services/status');
 const { recordOperation } = require('../services/stats');
+const { invalidateLandForecast } = require('../services/level-forecast');
 const { types } = require('./proto');
 const { toLong, toNum, syncServerTime, log, logWarn, sleep } = require('./utils');
 const cryptoWasm = require('./crypto-wasm');
@@ -26,7 +28,7 @@ const {
     selectDispatchIndex,
 } = require('./request-priority');
 const { getAmbientRequestClass } = require('./request-context');
-const { startAceRuntime, stopAceRuntime } = require('../services/ace');
+const { startAceRuntime, stopAceRuntime, getAceDiagnostics } = require('../services/ace');
 
 // ============ 事件发射器 (用于推送通知) ============
 const networkEvents = new EventEmitter();
@@ -45,6 +47,9 @@ interface ConnectionContext {
     intentionalClose: boolean;
     finalized: boolean;
     loginInitialized: boolean;
+    startedAt?: number;
+    onlineAt?: number;
+    heartbeat?: { attempts: number; replies: number; failures: number };
 }
 
 interface SendMsgOptions {
@@ -540,6 +545,10 @@ function handleMessage(data: Buffer): void {
                 if (errorCode !== 0) {
                     pending.callback(new GatewayError(meta));
                 } else {
+                    if ((meta.service_name === 'gamepb.plantpb.PlantService' && meta.method_name !== 'AllLands')
+                        || (meta.service_name === 'gamepb.itempb.ItemService' && meta.method_name === 'Use')) {
+                        invalidateLandForecast();
+                    }
                     pending.callback(null, msg.body, meta);
                 }
                 
@@ -562,10 +571,14 @@ function handleNotify(msg: any): void {
             log('推送', `被踢下线! ${type}`);
             try {
                 const notify = types.KickoutNotify.decode(eventBody);
-                log('推送', `原因: ${notify.reason_message || '未知'}`);
+                const reasonCode = toNum(notify.reason);
+                const diagnostics = getConnectionDiagnostics(currentConnection);
+                log('推送', `原因: ${notify.reason_message || '未知'} (${reasonCode})`, { reasonCode, diagnostics });
                 networkEvents.emit('kickout', {
                     type,
                     reason: notify.reason_message || '未知',
+                    reasonCode,
+                    diagnostics,
                 });
             } catch {}
             return;
@@ -579,6 +592,7 @@ function handleNotify(msg: any): void {
                 const lands = notify.lands || [];
                 if (lands.length > 0) {
                     if (hostGid === userState.gid || hostGid === 0) {
+                        invalidateLandForecast();
                         networkEvents.emit('landsChanged', lands);
                     }
                 }
@@ -837,23 +851,29 @@ function handleNotify(msg: any): void {
 // 官方 QQ 抓包（会话版本 1.14.0.4_20260911）的字段存在性：device_info 只写 client_version 和
 // sys_software，report_data 显式写出全部空字符串字段，extra 显式为空。protobufjs 按调用方是否
 // 赋值决定是否写默认值，所以这里必须保持字段集合与官方一致，不能只留非默认值。
+// QQ 1.15 separates player authentication from the farm scene login.
+// Keep explicit older QQ profiles and the verified WeChat profile on Login.
+function usesPlayerSceneLogin(): boolean {
+    if (isWechatPlatform()) return false;
+    const version = /^(\d+)\.(\d+)/.exec(getClientVersion());
+    return !!version && (Number(version[1]) > 1 || (Number(version[1]) === 1 && Number(version[2]) >= 15));
+}
+
 function buildLoginBody(): Buffer {
-    const di = CONFIG.deviceInfo || {};
-    return Buffer.from(types.LoginRequest.encode(types.LoginRequest.create({
+    const requestType = usesPlayerSceneLogin() ? types.PlayerLoginRequest : types.LoginRequest;
+    return Buffer.from(requestType.encode(requestType.create({
         sharer_id: toLong(0),
         sharer_open_id: '',
-        device_info: {
-            client_version: di.clientVersion || CONFIG.clientVersion,
-            sys_software: di.sysSoftware || 'Windows',
-        },
+        device_info: getLoginDeviceInfo(),
         share_cfg_id: toLong(0),
-        scene_id: '1234567',
+        // WeChat launch scene is entry-dependent and unavailable from a standalone Code.
+        scene_id: isWechatPlatform() ? undefined : '1234567',
         report_data: {
             callback: '',
             cd_extend_info: '',
             click_id: '',
             clue_token: '',
-            minigame_channel: 'other-qq',
+            minigame_channel: isWechatPlatform() ? 'other' : 'other-qq',
             minigame_platid: 2,
             req_id: '',
             trackid: '',
@@ -864,8 +884,7 @@ function buildLoginBody(): Buffer {
 
 async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void): Promise<void> {
     const body = buildLoginBody();
-
-    await sendMsg(context, 'gamepb.userpb.UserService', 'Login', body, {
+    await sendMsg(context, 'gamepb.userpb.UserService', usesPlayerSceneLogin() ? 'PlayerLogin' : 'Login', body, {
         expectedErrorCodes: new Set(),
         // 登录不走排队器（此时还没 online），按保命流量记账。
         requestClass: 'critical',
@@ -882,7 +901,7 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
 
         let reply: any;
         try {
-            reply = types.LoginReply.decode(bodyBytes!);
+            reply = (usesPlayerSceneLogin() ? types.PlayerLoginReply : types.LoginReply).decode(bodyBytes!);
         } catch (e: any) {
             log('登录', `解码失败: ${e.message}`);
             return;
@@ -938,6 +957,7 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
             if (!isCurrentConnection(context)) return;
             networkScheduler.clear('login_timeout');
             context.phase = 'online';
+            context.onlineAt = Date.now();
             startAceRuntime((service: string, method: string, body: Buffer, timeoutMs?: number) => (
                 sendMsgAsync(service, method, body, { timeoutMs, priority: 'high', criticalLane: 'ace' })
             ));
@@ -945,6 +965,15 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
             // 登录引导阶段串行完成普通请求，避免和后续活动、背包初始化同时挤入 Gateway。
             await fetchUserSettings();
             if (!isCurrentConnection(context)) return;
+            if (usesPlayerSceneLogin()) {
+                const sceneBody = types.PlayerSceneLoginRequest.encode({ global_scene_id: 1 }).finish();
+                const sceneResponse = await sendMsgAsync('gamepb.globalscenepb.GlobalSceneService', 'PlayerSceneLogin', sceneBody);
+                if (!isCurrentConnection(context)) return;
+                const scene = types.PlayerSceneLoginReply.decode(sceneResponse.body);
+                if (scene.global_scene_id !== 1 || !scene.farm_scene_ext_data?.length) {
+                    throw new Error('农场场景登录回包不完整');
+                }
+            }
             if (onLoginSuccess) await onLoginSuccess();
         } catch (e: any) {
             logWarn('登录', `登录初始化失败: ${e.message}`);
@@ -964,13 +993,15 @@ const HEARTBEAT_REQUEST_TIMEOUT = 20000;
 function buildHeartbeatBody(gid: number): Buffer {
     return Buffer.from(types.HeartbeatRequest.encode(types.HeartbeatRequest.create({
         gid: toLong(gid),
-        client_version: CONFIG.clientVersion,
+        client_version: getClientVersion(),
         field_3: toLong(0),
     })).finish());
 }
 
 function startHeartbeat(context: ConnectionContext): void {
     networkScheduler.clear('heartbeat_interval');
+    const heartbeat = { attempts: 0, replies: 0, failures: 0 };
+    context.heartbeat = heartbeat;
     lastHeartbeatResponse = Date.now();
     lastInboundAt = Date.now();
     heartbeatMissCount = 0;
@@ -979,6 +1010,7 @@ function startHeartbeat(context: ConnectionContext): void {
         if (!isCurrentConnection(context) || context.phase !== 'online' || !userState.gid) return;
 
         const body = buildHeartbeatBody(userState.gid);
+        heartbeat.attempts += 1;
         try {
             const { body: replyBody } = await sendMsgAsync(
                 'gamepb.userpb.UserService',
@@ -987,6 +1019,7 @@ function startHeartbeat(context: ConnectionContext): void {
                 { timeoutMs: HEARTBEAT_REQUEST_TIMEOUT, priority: 'high', criticalLane: 'heartbeat' },
             );
             if (!isCurrentConnection(context)) return;
+            heartbeat.replies += 1;
             lastHeartbeatResponse = Date.now();
             heartbeatMissCount = 0;
             try {
@@ -995,6 +1028,7 @@ function startHeartbeat(context: ConnectionContext): void {
             } catch {}
         } catch {
             if (!isCurrentConnection(context)) return;
+            heartbeat.failures += 1;
             heartbeatMissCount += 1;
             const now = Date.now();
             const inboundSilenceMs = Math.max(0, now - lastInboundAt);
@@ -1029,8 +1063,27 @@ function clearNetworkRuntime(reason: string): void {
     networkScheduler.clearAll();
     stopAceRuntime(true);
     gatewayTokens.clear();
+    invalidateLandForecast();
     userState.gid = 0;
     userState.openId = '';
+}
+
+function getConnectionDiagnostics(context: ConnectionContext | null) {
+    return {
+        platform: CONFIG.platform,
+        clientVersion: getClientVersion(),
+        connectionAgeMs: context?.startedAt ? Math.max(0, Date.now() - context.startedAt) : 0,
+        onlineAgeMs: context?.onlineAt ? Math.max(0, Date.now() - context.onlineAt) : 0,
+        heartbeat: context?.heartbeat ? { ...context.heartbeat } : null,
+        ...getGatewayLoad(),
+        lastInboundAgeMs: Math.max(0, Date.now() - lastInboundAt),
+        lastHeartbeatAgeMs: Math.max(0, Date.now() - lastHeartbeatResponse),
+        heartbeatMissCount,
+        pendingRequests: describePendingRequests(),
+        queuedRequests: describeQueuedRequests(),
+        ace: context?.phase === 'online' ? getAceDiagnostics() : null,
+        tsdk: cryptoWasm.getDiagnostics(),
+    };
 }
 
 function finalizeConnection(context: ConnectionContext, details: DisconnectDetails): void {
@@ -1038,7 +1091,18 @@ function finalizeConnection(context: ConnectionContext, details: DisconnectDetai
     context.finalized = true;
     const wasCurrent = currentConnection === context;
     const wasLoginReady = context.phase === 'online';
+    // Snapshot before cleanup destroys TSDK state and clears request queues.
+    const diagnostics = getConnectionDiagnostics(context);
     if (wasCurrent) {
+        log('连接', '会话结束', {
+            event: 'connection_summary',
+            connectionId: context.id,
+            source: details.source,
+            disconnectCode: Number(details.code) || 0,
+            phase: context.phase,
+            intentionalClose: context.intentionalClose,
+            diagnostics,
+        });
         currentConnection = null;
         ws = null;
         clearNetworkRuntime(details.reason || details.source);
@@ -1051,6 +1115,7 @@ function finalizeConnection(context: ConnectionContext, details: DisconnectDetai
         reason: details.reason || '',
         phase: context.phase,
         wasLoginReady,
+        diagnostics,
         at: Date.now(),
     });
 }
@@ -1063,11 +1128,14 @@ function connect(code: string | null, onLoginSuccess?: () => void): void {
 
     clientSeq = 1;
     serverSeq = 0;
+    lastInboundAt = Date.now();
+    lastHeartbeatResponse = Date.now();
+    heartbeatMissCount = 0;
     const url = new URL(CONFIG.serverUrl);
     url.search = new URLSearchParams({
         platform: CONFIG.platform,
         os: CONFIG.os,
-        ver: CONFIG.clientVersion,
+        ver: getClientVersion(),
         code: authCode,
     }).toString();
     const di = CONFIG.deviceInfo || {};
@@ -1084,6 +1152,7 @@ function connect(code: string | null, onLoginSuccess?: () => void): void {
         intentionalClose: false,
         finalized: false,
         loginInitialized: false,
+        startedAt: Date.now(),
     };
     currentConnection = context;
     ws = socket;

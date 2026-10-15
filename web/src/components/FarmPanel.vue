@@ -10,6 +10,8 @@ import { getApiErrorMessage } from '@/api'
 import CareerHarvestSteal from '@/components/CareerHarvestSteal.vue'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import LandCard from '@/components/LandCard.vue'
+import LandDetailModal from '@/components/LandDetailModal.vue'
+import BaseSelect from '@/components/ui/BaseSelect.vue'
 import { useAccountStore } from '@/stores/account'
 import { useFarmStore } from '@/stores/farm'
 import { useSettingStore } from '@/stores/setting'
@@ -42,6 +44,11 @@ const {
 const { currentAccountId, currentAccount } = storeToRefs(accountStore)
 const { settings } = storeToRefs(settingStore)
 const { status } = storeToRefs(statusStore)
+const detailLandId = ref<number | null>(null)
+const detailLand = computed(() => lands.value.find(land => land.id === detailLandId.value) || null)
+watch(currentAccountId, () => {
+  detailLandId.value = null
+})
 
 const currentAccountConnected = computed(() => {
   const accountId = String(currentAccountId.value || '')
@@ -55,6 +62,16 @@ const currentAccountRunning = computed(() => (
 
 const operating = ref(false)
 const fertilizingLandId = ref<number | null>(null)
+const fertilizerConfirmVisible = ref(false)
+const bulkFertilizerType = ref<FertilizerType>('normal')
+const bulkFertilizerOptions = [{ label: '普通化肥', value: 'normal' }, { label: '有机化肥', value: 'organic' }]
+const bulkFertilizerCount = computed(() => lands.value.filter(isFertilizeCandidate).length)
+let fertilizerUiSequence = 0
+watch(currentAccountId, () => {
+  fertilizerUiSequence++
+  fertilizerConfirmVisible.value = false
+  fertilizingLandId.value = null
+})
 const farmingLandId = ref<number | null>(null)
 const manualRefreshing = ref(false)
 const refreshIconClass = 'i-carbon-renew'
@@ -278,9 +295,12 @@ async function handleFertilize(land: any, fertilizerType: FertilizerType) {
 
   const typeName = fertilizerType === 'organic' ? '有机化肥' : '普通化肥'
   const landId = Number(land.id)
+  const sequence = ++fertilizerUiSequence
   fertilizingLandId.value = landId
   try {
     const result = await farmStore.fertilizeLand(currentAccountId.value, landId, fertilizerType)
+    if (sequence !== fertilizerUiSequence)
+      return
     if (!result) {
       toast.error(fertilizeError.value || `${typeName}使用失败`)
       return
@@ -289,9 +309,35 @@ async function handleFertilize(land: any, fertilizerType: FertilizerType) {
     toast.success(remainingText ? `已施${typeName}，${remainingText}` : `已施${typeName}`)
   }
   finally {
-    if (fertilizingLandId.value === landId)
+    if (sequence === fertilizerUiSequence && fertilizingLandId.value === landId)
       fertilizingLandId.value = null
   }
+}
+
+async function handleFertilizeAll() {
+  if (!currentAccountId.value || !currentAccountRunning.value || fertilizePending.value || operating.value)
+    return
+  if (!bulkFertilizerCount.value) {
+    fertilizerConfirmVisible.value = false
+    toast.info('当前没有可施肥的作物')
+    return
+  }
+  const sequence = ++fertilizerUiSequence
+  const result = await farmStore.fertilizeAll(currentAccountId.value, bulkFertilizerType.value)
+  if (sequence !== fertilizerUiSequence)
+    return
+  fertilizerConfirmVisible.value = false
+  if (!result) {
+    toast.error(fertilizeError.value || '一键施肥失败，请刷新土地确认最新状态')
+    return
+  }
+  if (!result.successCount) {
+    toast.info('当前没有可施肥的作物')
+    return
+  }
+  const skipped = result.skippedCount ? `，${result.skippedCount} 株未施肥` : ''
+  const remaining = formatFertilizerRemaining(Number(result.fertilizerRemainingSec || 0))
+  toast.success(`已为 ${result.successCount} 株作物施肥${skipped}${remaining ? `，${remaining}` : ''}`)
 }
 
 async function handleFarmLand(land: any) {
@@ -464,10 +510,17 @@ onUnmounted(() => {
         </div>
         <div class="grid grid-cols-2 gap-3 sm:flex sm:flex-wrap">
           <NButton
+            :disabled="operating || fertilizePending || farmingLandId !== null || !currentAccountRunning || !loaded || !!error || !lands.some(isFertilizeCandidate)"
+            @click="fertilizerConfirmVisible = true"
+          >
+            <span class="i-carbon-soil-moisture" />
+            一键施肥
+          </NButton>
+          <NButton
             v-for="op in operations"
             :key="op.type"
             :type="op.buttonType"
-            :disabled="operating || farmingLandId !== null || !currentAccountRunning"
+            :disabled="operating || fertilizePending || farmingLandId !== null || !currentAccountRunning"
             @click="handleOperate(op.type)"
           >
             <span :class="op.icon" />
@@ -644,6 +697,7 @@ onUnmounted(() => {
               v-for="land in lands"
               :key="land.id"
               :land="land"
+              show-details
               :selectable="!!selectedInteractionItem"
               :selected="isInteractionLandSelected(land)"
               :selection-disabled="isInteractionLandDisabled(land)"
@@ -656,6 +710,7 @@ onUnmounted(() => {
               :show-farming-action="isLandFarmingCandidate(land)"
               :farming-pending="farmingLandId === land.id"
               :farming-disabled="farmingLandId !== null || operating"
+              @details="detailLandId = $event.id"
               @select="toggleInteractionLand(land)"
               @fertilize="handleFertilize"
               @farm="handleFarmLand"
@@ -665,6 +720,22 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <LandDetailModal :land="detailLand" :player="status?.status" :connected="currentAccountConnected" @close="detailLandId = null" />
+
+    <ConfirmModal
+      :show="fertilizerConfirmVisible"
+      title="一键施肥"
+      message="将为所有生长中的作物施用一次所选化肥，确认施肥吗？"
+      confirm-text="确认施肥"
+      :loading="fertilizePending"
+      @confirm="handleFertilizeAll"
+      @cancel="fertilizerConfirmVisible = false"
+    >
+      <BaseSelect v-model="bulkFertilizerType" label="化肥类型" :options="bulkFertilizerOptions" :disabled="fertilizePending" />
+      <p class="mt-3 text-sm text-gray-500">
+        可施肥 {{ bulkFertilizerCount }} 株作物
+      </p>
+    </ConfirmModal>
     <ConfirmModal
       :show="confirmVisible"
       :title="confirmConfig.title"
