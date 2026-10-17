@@ -791,6 +791,15 @@ async function handleApiCall(msg: any): Promise<void> {
             case 'getIllustratedSnapshot':
                 result = await require('../services/illustrated').getIllustratedSnapshot();
                 break;
+            case 'claimIllustratedRewards':
+                result = await require('../services/illustrated').claimIllustratedRewards(args[0]);
+                break;
+            case 'getSolarCalendar':
+                result = await require('../services/solar-calendar').getSolarCalendar();
+                break;
+            case 'operateSolarCalendar':
+                result = await require('../services/solar-calendar').operateSolarCalendar(args[0], args[1]);
+                break;
             case 'getFriends':
                 result = await getFriendsList(args[0] === true, 'normal', args[1] === true);
                 break;
@@ -1149,10 +1158,12 @@ async function getDailyGiftOverview(propagateErrors: boolean = false): Promise<a
                 label: '会员礼包',
                 enabled: true,
                 doneToday: !!vip.doneToday,
-                lastAt: Number(vip.lastClaimAt || vip.lastCheckAt || 0),
-                hasGift: Object.hasOwn(vip, 'hasGift') ? !!vip.hasGift : undefined,
-                canClaim: Object.hasOwn(vip, 'canClaim') ? !!vip.canClaim : undefined,
+                lastAt: Math.max(Number(vip.lastClaimAt || 0), Number(vip.lastCheckAt || 0)),
+                isVip: typeof vip.isVip === 'boolean' ? vip.isVip : null,
+                hasGift: typeof vip.hasGift === 'boolean' ? vip.hasGift : null,
+                canClaim: typeof vip.canClaim === 'boolean' ? vip.canClaim : null,
                 result: vip.result || '',
+                lastError: vip.lastError || '',
             },
             {
                 key: 'month_card_gift',
