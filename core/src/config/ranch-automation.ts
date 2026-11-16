@@ -44,10 +44,10 @@ export function normalizeRanchSetting(key: string, value: unknown): boolean | nu
     }
     if (key === 'ranch_check_minutes') {
         const number = Number(value);
-        if (!Number.isInteger(number) || number < 1 || number > 60) {
-            throw Object.assign(new Error('牧场巡查间隔必须是 1–60 的整数分钟'), { code: 'INVALID_CONFIG' });
+        if (!Number.isFinite(number) || !Number.isInteger(Math.round(number * 60)) || Math.abs(number * 60 - Math.round(number * 60)) > 1e-7 || number < 1 / 60 || number > 60) {
+            throw Object.assign(new Error('牧场巡查间隔必须是 1–3600 秒（整数秒）'), { code: 'INVALID_CONFIG' });
         }
-        return number;
+        return Math.round(number * 60) / 60;
     }
     if (typeof value !== 'boolean') throw Object.assign(new Error('牧场开关必须为布尔值'), { code: 'INVALID_CONFIG' });
     return value;
