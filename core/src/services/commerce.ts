@@ -1,6 +1,6 @@
 export {};
 
-const { getItemById, getItemImageById } = require('../config/gameConfig');
+const { getItemById, getItemImageById, getShopGoodsById } = require('../config/gameConfig');
 const { getServerTimeSec, toNum } = require('../utils/utils');
 const mallService = require('./mall');
 const mysteryShopService = require('./mystery-shop');
@@ -181,6 +181,10 @@ async function purchaseMallProduct(goodsIdInput: unknown, countInput: unknown, s
         if (expectedPrice && (Number(expectedPrice.id) !== goods.price.id || Number(expectedPrice.count) !== goods.price.count)) {
             throw businessError('MALL_PRICE_CHANGED', '商品价格已变化，请刷新商城后重新确认');
         }
+        if (Array.isArray(expectedPrice?.rewards)) {
+            const signature = (items: any[]) => items.map(item => `${item.id}:${item.count}`).sort().join('|');
+            if (signature(expectedPrice.rewards) !== signature(goods.rewards)) throw businessError('MALL_CONTENT_CHANGED', '礼包内容已变化，请刷新后重新确认');
+        }
         if (!goods.isFree && (goods.price.id <= 0 || goods.price.count <= 0 || goods.price.balance === null)) {
             throw businessError('MALL_BALANCE_UNAVAILABLE', '商品价格或余额未确认，请刷新后重试');
         }
@@ -204,6 +208,104 @@ async function purchaseMallProduct(goodsIdInput: unknown, countInput: unknown, s
             catalog,
             refreshRequired: !catalog,
         };
+    });
+}
+
+// ShopService 4 is the official 道具 tab; MallService slot 4 is SVIP.
+const PROPS_SHOP_ID = 4;
+
+async function getPropsShop(): Promise<any> {
+    const reply = await require('./farm/api').getShopInfo(PROPS_SHOP_ID);
+    // ShopInfo only sends amounts; the official client resolves currency from Goods.price_id.
+    const offers = (reply.goods_list || []).map((goods: any) => {
+        const config = getShopGoodsById(toNum(goods.id));
+        const currencyId = config?.shop_id === PROPS_SHOP_ID && config.item_id === toNum(goods.item_id)
+            ? config.price_id : 0;
+        return { goods, currencyId };
+    });
+    const currencyIds = Array.from(new Set<number>(offers.map((offer: any) => offer.currencyId))).filter(id => id > 0);
+    const balances = await currencyBalances(currencyIds);
+    const now = getServerTimeSec();
+    return {
+        shopId: PROPS_SHOP_ID,
+        slotType: 0,
+        subSlotType: 0,
+        serverTime: now * 1000,
+        refreshCountdown: 0,
+        currencies: currencyIds.map(id => ({ ...itemDto({ id, count: balances[id] || 0 }), balanceKnown: Object.hasOwn(balances, id) })),
+        goods: offers.map(({ goods, currencyId }: any) => {
+            const start = toNum(goods.discount_start_time);
+            const end = toNum(goods.discount_end_time);
+            // Proto3 omits discount_price=0. Positive, active dates establish
+            // a free promotion even when that price has no wire field.
+            const promotionActive = start > 0 && end > start && start <= now && now < end;
+            const price = promotionActive ? toNum(goods.discount_price) : toNum(goods.price);
+            const reward = itemDto({ id: goods.item_id, count: goods.item_count });
+            const max = toNum(goods.limit_count);
+            const bought = toNum(goods.bought_num);
+            const limit = max > 0 ? { type: 1, bought, max, remaining: Math.max(0, max - bought) } : null;
+            const valid = currencyId > 0 && Number.isSafeInteger(price) && price >= 0 && reward.id > 0 && Number.isSafeInteger(reward.count) && reward.count > 0;
+            const expired = toNum(goods.end_time) > 0 && now >= toNum(goods.end_time);
+            const status = goods.owned ? 'owned' : limit?.remaining === 0 ? 'sold_out'
+                : goods.unlocked !== true || expired || !valid ? 'unavailable' : 'available';
+            const reason = status === 'owned' ? '已拥有该道具' : status === 'sold_out' ? '已达到限购上限'
+                : expired ? '商品已下架' : goods.unlocked !== true ? '道具尚未解锁'
+                    : currencyId <= 0 ? '商品币种未确认，请更新游戏资源' : !valid ? '商品价格或内容未确认' : '';
+            return {
+                id: toNum(goods.id), name: reward.name, type: PROPS_SHOP_ID,
+                rewards: [reward],
+                price: { ...itemDto({ id: currencyId, count: price }), balance: balances[currencyId] ?? null },
+                originalPrice: promotionActive ? toNum(goods.price) : null,
+                isFree: valid && price === 0,
+                limit, isLimited: !!limit,
+                discountText: '', isDiscounted: promotionActive, discountEndTime: promotionActive ? end * 1000 : 0,
+                purchaseStatus: status, unavailableReason: reason,
+                available: status === 'available', purchasable: status === 'available',
+            };
+        }),
+    };
+}
+
+async function purchaseProps(goodsIdInput: unknown, countInput: unknown, expectedOffer: any): Promise<any> {
+    const goodsId = positiveInteger(goodsIdInput, 'INVALID_GOODS_ID', 'goodsId');
+    const count = positiveInteger(countInput, 'INVALID_PURCHASE_COUNT', 'count');
+    if (count > 9999) throw businessError('INVALID_PURCHASE_COUNT', '购买数量超过上限');
+    return serializePurchase(async () => {
+        const before = await getPropsShop();
+        const goods = before.goods.find((entry: any) => entry.id === goodsId);
+        if (!goods?.purchasable) throw businessError('GOODS_UNAVAILABLE', goods?.unavailableReason || '道具已不在当前商店中');
+        const signature = (items: any[]) => items.map(item => `${item.id}:${item.count}`).sort().join('|');
+        if (!expectedOffer || Number(expectedOffer.price?.id) !== goods.price.id || Number(expectedOffer.price?.count) !== goods.price.count
+            || !Array.isArray(expectedOffer.rewards) || signature(expectedOffer.rewards) !== signature(goods.rewards)) {
+            throw businessError('SHOP_OFFER_CHANGED', '道具价格或内容已变化，请刷新后重新确认');
+        }
+        if (goods.limit && goods.limit.remaining < count) throw businessError('PURCHASE_LIMIT_EXCEEDED', '购买数量超过剩余限购数量');
+        const amount = goods.price.count * count;
+        const rewardAmount = goods.rewards[0].count * count;
+        if (!Number.isSafeInteger(amount) || !Number.isSafeInteger(rewardAmount)) throw businessError('INVALID_PURCHASE_COUNT', '购买数量无效');
+        if (amount > 0) {
+            let available: number;
+            if (goods.price.id === 1004) {
+                available = toNum(await require('./pay').getDiamondBalance());
+            } else {
+                const warehouse = require('./warehouse');
+                const bag = await warehouse.getBag();
+                const currency = warehouse.getBagItems(bag).filter((item: any) => toNum(item.id) === goods.price.id);
+                available = currency.filter((item: any) => !warehouse.isItemLocked(item)).reduce((sum: number, item: any) => sum + toNum(item.count), 0);
+            }
+            if (goods.price.balance === null || available < amount) throw businessError('INSUFFICIENT_BALANCE', `${goods.price.name}可用余额不足`);
+        }
+        const reply = await require('./farm/api').buyGoods(goodsId, count, goods.price.count);
+        const rewards = (reply.get_items || []).map((item: any) => itemDto(item));
+        const costs = (reply.cost_items || []).map((item: any) => itemDto(item)).filter((item: any) => item.count > 0);
+        if (rewards.length !== 1 || rewards[0].id !== goods.rewards[0].id || rewards[0].count !== rewardAmount
+            || costs.some((item: any) => item.id !== goods.price.id)
+            || costs.reduce((sum: number, item: any) => sum + item.count, 0) !== amount) {
+            throw businessError('SHOP_RESULT_UNCONFIRMED', '购买回包与商品不一致，请刷新确认，勿重复购买');
+        }
+        let catalog = null;
+        try { catalog = await getPropsShop(); } catch {}
+        return { purchase: { goodsId, count, rewards }, catalog, refreshRequired: !catalog };
     });
 }
 
@@ -266,6 +368,8 @@ async function purchaseMysteryOffer(npcIdInput: unknown): Promise<any> {
 }
 
 module.exports = {
+    getPropsShop,
+    purchaseProps,
     getMallCatalog,
     purchaseMallProduct,
     getMysteryShop,

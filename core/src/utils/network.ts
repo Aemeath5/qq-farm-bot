@@ -1,7 +1,9 @@
 export {};
 const { Buffer } = require('node:buffer');
+const { performance } = require('node:perf_hooks');
 const { EventEmitter } = require('node:events');
 const WebSocket = require('ws');
+const { util: protobufUtil } = require('protobufjs');
 const { CONFIG } = require('../config/config');
 const { getClientVersion, getLoginDeviceInfo, isWechatPlatform } = require('./client-profile');
 const { createScheduler } = require('../services/scheduler');
@@ -9,7 +11,7 @@ const { updateStatusFromLogin, updateStatusGold, updateStatusLevel } = require('
 const { recordOperation } = require('../services/stats');
 const { invalidateLandForecast } = require('../services/level-forecast');
 const { types } = require('./proto');
-const { toLong, toNum, syncServerTime, log, logWarn, sleep } = require('./utils');
+const { toLong, toNum, syncServerTime, getServerTimeSec, formatDateKeyInTimeZone, log, logWarn, sleep } = require('./utils');
 const cryptoWasm = require('./crypto-wasm');
 const { GatewayTokenProvider } = require('./gateway-token');
 const { MAX_HEARTBEAT_MISSES, shouldTerminateForHeartbeat } = require('./keepalive-policy');
@@ -47,12 +49,15 @@ interface ConnectionContext {
     intentionalClose: boolean;
     finalized: boolean;
     loginInitialized: boolean;
-    startedAt?: number;
-    onlineAt?: number;
+    clientVersion: string;
+    startedMono?: number;
+    onlineMono?: number;
     heartbeat?: { attempts: number; replies: number; failures: number };
 }
 
 interface SendMsgOptions {
+    beforeSend?: () => Error | null;
+    onSent?: () => void;
     timeoutMs?: number;
     expectedErrorCodes?: readonly number[];
     /** 兼容旧调用：high→critical、low→background、normal 视为「未表态」交给环境班次。 */
@@ -68,12 +73,14 @@ interface PendingRequest {
     expectedErrorCodes: Set<number>;
     serviceName?: string;
     methodName?: string;
-    startedAt?: number;
+    startedMono?: number;
     requestClass: RequestClass;
     criticalLane?: CriticalLane;
 }
 
 interface QueuedRequest {
+    beforeSend?: () => Error | null;
+    onSent?: () => void;
     context: ConnectionContext;
     serviceName: string;
     methodName: string;
@@ -136,8 +143,8 @@ let wsErrorState = { code: 0, at: 0, message: '' };
 let lastRequestPressureLogAt = 0;
 const networkScheduler = createScheduler('network');
 const gatewayTokens = new GatewayTokenProvider();
-let lastHeartbeatResponse = Date.now();
-let lastInboundAt = Date.now();
+let lastHeartbeatMono = performance.now();
+let lastInboundMono = performance.now();
 let heartbeatMissCount = 0;
 
 function settleQueuedRequest(request: QueuedRequest, error?: Error, value?: { body: Buffer; meta: any }): void {
@@ -175,11 +182,11 @@ interface GatewayLoad {
 }
 
 function oldestPendingAgeMs(): number {
-    const now = Date.now();
+    const now = performance.now();
     let oldest = 0;
     for (const pending of pendingCallbacks.values()) {
-        if (!pending.startedAt) continue;
-        const age = Math.max(0, now - pending.startedAt);
+        if (pending.startedMono === undefined) continue;
+        const age = Math.max(0, now - pending.startedMono);
         if (age > oldest) oldest = age;
     }
     return oldest;
@@ -212,10 +219,10 @@ async function waitForGatewayIdle(
     maxWaitMs: number = LOW_PRIORITY_IDLE_WAIT_MAX_MS,
     pollMs: number = LOW_PRIORITY_IDLE_POLL_MS,
 ): Promise<boolean> {
-    const deadline = Date.now() + Math.max(0, Number(maxWaitMs) || 0);
+    const deadline = performance.now() + Math.max(0, Number(maxWaitMs) || 0);
     for (;;) {
         if (isGatewayIdleForBackground()) return true;
-        if (Date.now() >= deadline) return false;
+        if (performance.now() >= deadline) return false;
         await sleep(Math.max(20, Number(pollMs) || LOW_PRIORITY_IDLE_POLL_MS));
     }
 }
@@ -229,7 +236,7 @@ function takeDispatchableRequest(): QueuedRequest | null {
         if (requestQueue[index].settled) requestQueue.splice(index, 1);
     }
     if (requestQueue.length === 0) return null;
-    const index = selectDispatchIndex(requestQueue, Array.from(pendingCallbacks.values()), Date.now());
+    const index = selectDispatchIndex(requestQueue, Array.from(pendingCallbacks.values()), performance.now());
     if (index < 0) return null;
     return requestQueue.splice(index, 1)[0];
 }
@@ -249,7 +256,7 @@ function drainRequestQueue(): void {
         const pending: PendingRequest | undefined = request.expectReply ? {
             serviceName: request.serviceName,
             methodName: request.methodName,
-            startedAt: Date.now(),
+            startedMono: performance.now(),
             requestClass: request.requestClass,
             criticalLane: request.criticalLane,
             expectedErrorCodes: request.expectedErrorCodes,
@@ -259,7 +266,7 @@ function drainRequestQueue(): void {
                 drainRequestQueue();
             },
         } : undefined;
-        sendMsg(request.context, request.serviceName, request.methodName, request.bodyBytes, pending).then((sent) => {
+        sendMsg(request.context, request.serviceName, request.methodName, request.bodyBytes, pending, request).then((sent) => {
             if (sent) {
                 if (!request.expectReply) {
                     settleQueuedRequest(request, undefined, { body: Buffer.alloc(0), meta: {} });
@@ -299,12 +306,12 @@ function rejectAllPendingRequests(reason = '请求被中断'): number {
 
 function describePendingRequests(): string {
     if (pendingCallbacks.size === 0) return 'none';
-    const now = Date.now();
+    const now = performance.now();
     return Array.from(pendingCallbacks.entries())
         .slice(0, MAX_DESCRIBED_PENDING_REQUESTS)
         .map(([seq, pending]) => {
             const method = pending.methodName || 'unknown';
-            const ageMs = pending.startedAt ? Math.max(0, now - pending.startedAt) : 0;
+            const ageMs = pending.startedMono !== undefined ? Math.max(0, now - pending.startedMono) : 0;
             return `${method}#${seq}:${ageMs}ms`;
         })
         .join(',');
@@ -319,7 +326,7 @@ function describeQueuedRequests(): string {
 }
 
 function logRequestPressure(): void {
-    const now = Date.now();
+    const now = performance.now();
     if (!shouldLogRequestPressure(requestQueue, now, lastRequestPressureLogAt)) return;
     lastRequestPressureLogAt = now;
     logWarn('系统', `Gateway 请求压力: pending=${pendingCallbacks.size}, queued=${requestQueue.length}, active=${describePendingRequests()}, queuedMethods=${describeQueuedRequests()}`);
@@ -336,9 +343,36 @@ const userState = {
     goldBean: 0,
     openId: '',
     avatarUrl: '',
+    globalSceneId: 1,
+    unlockedSceneIds: [] as number[],
 };
 
 function getUserState() { return userState; }
+
+const shareInfoState = new Map<string, { shareCount: string; claimed: boolean; dateKey: string }>();
+function applyShareInfos(infos: Record<string, any>): void {
+    const dateKey = formatDateKeyInTimeZone(getServerTimeSec() * 1000, 'Asia/Shanghai');
+    for (const [key, info] of Object.entries(infos)) {
+        const id = /^\d+$/.test(key) ? key : protobufUtil.longFromHash(key, false).toString();
+        shareInfoState.set(id, { shareCount: info.share_count.toString(), claimed: info.is_claimed, dateKey });
+    }
+}
+function getDailyShareInfo(id: number): any {
+    const dateKey = formatDateKeyInTimeZone(getServerTimeSec() * 1000, 'Asia/Shanghai');
+    const state = shareInfoState.get(String(id));
+    return state?.dateKey === dateKey ? { ...state } : { shareCount: '0', claimed: false, dateKey };
+}
+
+async function loginGameScene(globalSceneId: number): Promise<any> {
+    const body = types.PlayerSceneLoginRequest.encode({ global_scene_id: globalSceneId }).finish();
+    const response = await sendMsgAsync('gamepb.globalscenepb.GlobalSceneService', 'PlayerSceneLogin', body);
+    const scene = types.PlayerSceneLoginReply.decode(response.body);
+    const data = globalSceneId === 2 ? scene.big_farm_scene_ext_data : scene.farm_scene_ext_data;
+    if (scene.global_scene_id !== globalSceneId || !data?.length) throw new Error('游戏场景登录回包不完整');
+    userState.globalSceneId = globalSceneId;
+    if (toNum(scene.server_time) > 0) syncServerTime(toNum(scene.server_time));
+    return scene;
+}
 function getWsErrorState() { return { ...wsErrorState }; }
 function setWsErrorState(code: number, message: string): void {
     wsErrorState = { code: Number(code) || 0, at: Date.now(), message: message || '' };
@@ -389,7 +423,7 @@ function isCurrentConnection(context: ConnectionContext): boolean {
     return currentConnection === context && ws === context.socket && !context.finalized;
 }
 
-async function sendMsg(context: ConnectionContext, serviceName: string, methodName: string, bodyBytes: Buffer, pending?: PendingRequest): Promise<boolean> {
+async function sendMsg(context: ConnectionContext, serviceName: string, methodName: string, bodyBytes: Buffer, pending?: PendingRequest, hooks?: Pick<SendMsgOptions, 'beforeSend' | 'onSent'>): Promise<boolean> {
     if (!isCurrentConnection(context) || context.socket.readyState !== WebSocket.OPEN) {
         log('系统', '[WS] 连接未打开');
         return false;
@@ -407,8 +441,11 @@ async function sendMsg(context: ConnectionContext, serviceName: string, methodNa
         }
         return false;
     }
+    const blocked = hooks?.beforeSend?.();
+    if (blocked) throw blocked;
     try {
         context.socket.send(encoded);
+        hooks?.onSent?.();
     } catch (err: any) {
         if (pending) {
             pendingCallbacks.delete(seq);
@@ -470,8 +507,10 @@ function sendMsgAsync(serviceName: string, methodName: string, bodyBytes: Buffer
             settled: false,
             requestClass,
             criticalLane,
-            enqueuedAt: Date.now(),
+            enqueuedAt: performance.now(),
             expectReply,
+            beforeSend: options.beforeSend,
+            onSent: options.onSent,
         };
         requestQueue.push(request);
         networkScheduler.setTimeoutTask(request.timeoutKey, timeoutMs, () => {
@@ -512,7 +551,7 @@ function handleMessage(data: Buffer): void {
     try {
         const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
         const msg = types.GateMessage.decode(buf);
-        lastInboundAt = Date.now();
+        lastInboundMono = performance.now();
         const meta = msg.meta;
         if (!meta) return;
 
@@ -685,6 +724,7 @@ function handleNotify(msg: any): void {
             try {
                 const notify = types.BasicNotify.decode(eventBody);
                 if (notify.basic) {
+                    if (hasOwn(notify.basic, 'share_infos')) applyShareInfos(notify.basic.share_infos);
                     const oldLevel = userState.level;
                     if (hasOwn(notify.basic, 'level')) {
                         const nextLevel = toNum(notify.basic.level);
@@ -741,6 +781,12 @@ function handleNotify(msg: any): void {
             return;
         }
 
+        if (type.includes('GlobalSceneUnlockNotify')) {
+            const notify = types.GlobalSceneUnlockNotify.decode(eventBody);
+            userState.unlockedSceneIds = [...new Set([...userState.unlockedSceneIds, ...notify.unlocked_scenes])];
+            return;
+        }
+
         // 商品解锁通知
         if (type.includes('GoodsUnlockNotify')) {
             try {
@@ -758,7 +804,7 @@ function handleNotify(msg: any): void {
             try {
                 const notify = types.TaskInfoNotify.decode(eventBody);
                 if (notify.task_info) {
-                    networkEvents.emit('taskInfoNotify', notify.task_info);
+                    networkEvents.emit('taskInfoNotify', notify.task_info, { globalSceneId: userState.globalSceneId });
                 }
             } catch {}
             return;
@@ -848,43 +894,36 @@ function handleNotify(msg: any): void {
 }
 
 // ============ 登录 ============
-// 官方 QQ 抓包（会话版本 1.14.0.4_20260911）的字段存在性：device_info 只写 client_version 和
-// sys_software，report_data 显式写出全部空字符串字段，extra 显式为空。protobufjs 按调用方是否
-// 赋值决定是否写默认值，所以这里必须保持字段集合与官方一致，不能只留非默认值。
-// QQ 1.15 separates player authentication from the farm scene login.
-// Keep explicit older QQ profiles and the verified WeChat profile on Login.
-function usesPlayerSceneLogin(): boolean {
-    if (isWechatPlatform()) return false;
-    const version = /^(\d+)\.(\d+)/.exec(getClientVersion());
+// QQ and WeChat 1.15 both authenticate the player before entering a farm scene.
+// Historical versions retain their single-stage Login wire layout.
+function usesPlayerSceneLogin(clientVersion = getClientVersion()): boolean {
+    const version = /^(\d+)\.(\d+)/.exec(clientVersion);
     return !!version && (Number(version[1]) > 1 || (Number(version[1]) === 1 && Number(version[2]) >= 15));
 }
 
-function buildLoginBody(): Buffer {
-    const requestType = usesPlayerSceneLogin() ? types.PlayerLoginRequest : types.LoginRequest;
+function buildLoginBody(clientVersion = getClientVersion()): Buffer {
+    const modern = usesPlayerSceneLogin(clientVersion);
+    const requestType = modern ? types.PlayerLoginRequest : types.LoginRequest;
     return Buffer.from(requestType.encode(requestType.create({
         sharer_id: toLong(0),
         sharer_open_id: '',
-        device_info: getLoginDeviceInfo(),
+        device_info: getLoginDeviceInfo(clientVersion),
         share_cfg_id: toLong(0),
-        // WeChat launch scene is entry-dependent and unavailable from a standalone Code.
+        // A standalone WeChat Code does not supply its entry-dependent launch scene.
         scene_id: isWechatPlatform() ? undefined : '1234567',
         report_data: {
-            callback: '',
-            cd_extend_info: '',
-            click_id: '',
-            clue_token: '',
+            ...(modern ? {} : { callback: '', cd_extend_info: '', click_id: '', clue_token: '', req_id: '', trackid: '' }),
             minigame_channel: isWechatPlatform() ? 'other' : 'other-qq',
             minigame_platid: 2,
-            req_id: '',
-            trackid: '',
         },
-        extra: Buffer.alloc(0),
+        ...(modern ? { share_key: '', game_scene_id: 1 } : { extra: Buffer.alloc(0) }),
     })).finish());
 }
 
 async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void): Promise<void> {
-    const body = buildLoginBody();
-    await sendMsg(context, 'gamepb.userpb.UserService', usesPlayerSceneLogin() ? 'PlayerLogin' : 'Login', body, {
+    const modern = usesPlayerSceneLogin(context.clientVersion);
+    const body = buildLoginBody(context.clientVersion);
+    await sendMsg(context, 'gamepb.userpb.UserService', modern ? 'PlayerLogin' : 'Login', body, {
         expectedErrorCodes: new Set(),
         // 登录不走排队器（此时还没 online），按保命流量记账。
         requestClass: 'critical',
@@ -901,7 +940,7 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
 
         let reply: any;
         try {
-            reply = (usesPlayerSceneLogin() ? types.PlayerLoginReply : types.LoginReply).decode(bodyBytes!);
+            reply = (modern ? types.PlayerLoginReply : types.LoginReply).decode(bodyBytes!);
         } catch (e: any) {
             log('登录', `解码失败: ${e.message}`);
             return;
@@ -919,6 +958,9 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
         userState.exp = toNum(reply.basic.exp);
         userState.openId = String(reply.basic.open_id || '').trim();
         userState.avatarUrl = String(reply.basic.avatar_url || '').trim();
+        userState.unlockedSceneIds = modern ? (reply.unlocked_scene_ids || []).map(toNum) : [1];
+        shareInfoState.clear();
+        applyShareInfos(reply.basic.share_infos);
 
         updateStatusFromLogin({
             name: userState.name,
@@ -957,7 +999,7 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
             if (!isCurrentConnection(context)) return;
             networkScheduler.clear('login_timeout');
             context.phase = 'online';
-            context.onlineAt = Date.now();
+            context.onlineMono = performance.now();
             startAceRuntime((service: string, method: string, body: Buffer, timeoutMs?: number) => (
                 sendMsgAsync(service, method, body, { timeoutMs, priority: 'high', criticalLane: 'ace' })
             ));
@@ -965,14 +1007,9 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
             // 登录引导阶段串行完成普通请求，避免和后续活动、背包初始化同时挤入 Gateway。
             await fetchUserSettings();
             if (!isCurrentConnection(context)) return;
-            if (usesPlayerSceneLogin()) {
-                const sceneBody = types.PlayerSceneLoginRequest.encode({ global_scene_id: 1 }).finish();
-                const sceneResponse = await sendMsgAsync('gamepb.globalscenepb.GlobalSceneService', 'PlayerSceneLogin', sceneBody);
+            if (modern) {
+                await loginGameScene(1);
                 if (!isCurrentConnection(context)) return;
-                const scene = types.PlayerSceneLoginReply.decode(sceneResponse.body);
-                if (scene.global_scene_id !== 1 || !scene.farm_scene_ext_data?.length) {
-                    throw new Error('农场场景登录回包不完整');
-                }
             }
             if (onLoginSuccess) await onLoginSuccess();
         } catch (e: any) {
@@ -990,10 +1027,10 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
 // ============ 心跳 ============
 const HEARTBEAT_REQUEST_TIMEOUT = 20000;
 
-function buildHeartbeatBody(gid: number): Buffer {
+function buildHeartbeatBody(gid: number, clientVersion = getClientVersion()): Buffer {
     return Buffer.from(types.HeartbeatRequest.encode(types.HeartbeatRequest.create({
         gid: toLong(gid),
-        client_version: getClientVersion(),
+        client_version: clientVersion,
         field_3: toLong(0),
     })).finish());
 }
@@ -1002,14 +1039,14 @@ function startHeartbeat(context: ConnectionContext): void {
     networkScheduler.clear('heartbeat_interval');
     const heartbeat = { attempts: 0, replies: 0, failures: 0 };
     context.heartbeat = heartbeat;
-    lastHeartbeatResponse = Date.now();
-    lastInboundAt = Date.now();
+    lastHeartbeatMono = performance.now();
+    lastInboundMono = performance.now();
     heartbeatMissCount = 0;
 
     networkScheduler.setIntervalTask('heartbeat_interval', CONFIG.heartbeatInterval, async () => {
         if (!isCurrentConnection(context) || context.phase !== 'online' || !userState.gid) return;
 
-        const body = buildHeartbeatBody(userState.gid);
+        const body = buildHeartbeatBody(userState.gid, context.clientVersion);
         heartbeat.attempts += 1;
         try {
             const { body: replyBody } = await sendMsgAsync(
@@ -1020,7 +1057,7 @@ function startHeartbeat(context: ConnectionContext): void {
             );
             if (!isCurrentConnection(context)) return;
             heartbeat.replies += 1;
-            lastHeartbeatResponse = Date.now();
+            lastHeartbeatMono = performance.now();
             heartbeatMissCount = 0;
             try {
                 const reply = types.HeartbeatReply.decode(replyBody);
@@ -1030,9 +1067,9 @@ function startHeartbeat(context: ConnectionContext): void {
             if (!isCurrentConnection(context)) return;
             heartbeat.failures += 1;
             heartbeatMissCount += 1;
-            const now = Date.now();
-            const inboundSilenceMs = Math.max(0, now - lastInboundAt);
-            const heartbeatSilenceMs = Math.max(0, now - lastHeartbeatResponse);
+            const now = performance.now();
+            const inboundSilenceMs = Math.max(0, now - lastInboundMono);
+            const heartbeatSilenceMs = Math.max(0, now - lastHeartbeatMono);
             logWarn(
                 '心跳',
                 `心跳未响应 (miss=${heartbeatMissCount}/${MAX_HEARTBEAT_MISSES}, `
@@ -1071,13 +1108,13 @@ function clearNetworkRuntime(reason: string): void {
 function getConnectionDiagnostics(context: ConnectionContext | null) {
     return {
         platform: CONFIG.platform,
-        clientVersion: getClientVersion(),
-        connectionAgeMs: context?.startedAt ? Math.max(0, Date.now() - context.startedAt) : 0,
-        onlineAgeMs: context?.onlineAt ? Math.max(0, Date.now() - context.onlineAt) : 0,
+        clientVersion: context?.clientVersion || getClientVersion(),
+        connectionAgeMs: context?.startedMono !== undefined ? Math.max(0, performance.now() - context.startedMono) : 0,
+        onlineAgeMs: context?.onlineMono !== undefined ? Math.max(0, performance.now() - context.onlineMono) : 0,
         heartbeat: context?.heartbeat ? { ...context.heartbeat } : null,
         ...getGatewayLoad(),
-        lastInboundAgeMs: Math.max(0, Date.now() - lastInboundAt),
-        lastHeartbeatAgeMs: Math.max(0, Date.now() - lastHeartbeatResponse),
+        lastInboundAgeMs: Math.max(0, performance.now() - lastInboundMono),
+        lastHeartbeatAgeMs: Math.max(0, performance.now() - lastHeartbeatMono),
         heartbeatMissCount,
         pendingRequests: describePendingRequests(),
         queuedRequests: describeQueuedRequests(),
@@ -1128,18 +1165,20 @@ function connect(code: string | null, onLoginSuccess?: () => void): void {
 
     clientSeq = 1;
     serverSeq = 0;
-    lastInboundAt = Date.now();
-    lastHeartbeatResponse = Date.now();
+    lastInboundMono = performance.now();
+    lastHeartbeatMono = performance.now();
     heartbeatMissCount = 0;
+    const clientVersion = getClientVersion();
     const url = new URL(CONFIG.serverUrl);
     url.search = new URLSearchParams({
-        platform: CONFIG.platform,
+        platform: isWechatPlatform() ? 'wx' : CONFIG.platform,
         os: CONFIG.os,
-        ver: getClientVersion(),
+        ver: clientVersion,
         code: authCode,
     }).toString();
     const di = CONFIG.deviceInfo || {};
     const socket = new WebSocket(url.toString(), {
+        handshakeTimeout: 20000,
         headers: {
             'User-Agent': di.userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) NetType/WIFI MiniProgramEnv/Windows WindowsWechat/WMPF WindowsWechat(0x63090a13)',
             'Origin': 'https://gate-obt.nqf.qq.com',
@@ -1152,7 +1191,8 @@ function connect(code: string | null, onLoginSuccess?: () => void): void {
         intentionalClose: false,
         finalized: false,
         loginInitialized: false,
-        startedAt: Date.now(),
+        clientVersion,
+        startedMono: performance.now(),
     };
     currentConnection = context;
     ws = socket;
@@ -1214,13 +1254,20 @@ function cleanup(reason = '网络清理'): void {
 
 function getWs(): WebSocket | null { return ws; }
 
+function invalidateGameScene(reason = '游戏场景状态未知，需要重新登录'): void {
+    const context = currentConnection;
+    if (!context) return;
+    finalizeConnection(context, { source: 'game_scene_unknown', reason });
+    (context.socket as any).terminate();
+}
+
 module.exports = {
     connect, cleanup, getWs,
     buildLoginBody, buildHeartbeatBody,
     sendMsgAsync, sendMsgNoReply,
     getGatewayLoad, isGatewayIdleForBackground, waitForGatewayIdle,
     GatewayError, GatewayBusyError,
-    getUserState,
+    getUserState, loginGameScene, invalidateGameScene, applyShareInfos, getDailyShareInfo,
     getWsErrorState,
     networkEvents,
 };

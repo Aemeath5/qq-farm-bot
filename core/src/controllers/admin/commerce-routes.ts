@@ -21,7 +21,7 @@ function friendlyError(error: any): { code: string; message: string } {
     const code = String(error?.code || raw.match(/\bcode=(\d+)\b/)?.[1] || 'COMMERCE_OPERATION_FAILED');
     if (ERROR_MESSAGES[code]) return { code, message: ERROR_MESSAGES[code] };
     const protocolMessage = String(error?.errorMessage || '').trim()
-        || raw.match(/\bcode=\d+\b\s*(.*)$/)?.[1]?.trim();
+        || raw.match(/\bcode=\d+\b(.*)$/)?.[1]?.trim();
     if (protocolMessage) return { code, message: protocolMessage };
     if (raw.includes('账号未运行') || raw.includes('账号已离线') || raw.includes('连接未打开') || raw.includes('账号尚未登录')) {
         return { code: 'ACCOUNT_OFFLINE', message: '当前账号尚未运行，请启动账号后重试' };
@@ -47,6 +47,11 @@ function mountCommerceRoutes(app: Application, ctx: AdminContext): void {
         };
     };
 
+    app.get('/api/ranch/automation-options', (_req: Request, res: Response) => res.json({ ok: true, data: require('../../config/ranch-automation').RANCH_ANIMAL_OPTIONS }));
+    app.get('/api/ranch', withAccount((accountId: string, req: Request) => ctx.provider.getRanchState(accountId, String(req.query.view || 'animals'), req.query.shopId === undefined ? undefined : Number(req.query.shopId), req.query.hostGid === undefined ? undefined : String(req.query.hostGid))));
+    app.post('/api/ranch/:action/quote', withAccount((accountId: string, req: Request) => ctx.provider.prepareRanchAction(accountId, String(req.params.action), req.body)));
+    app.post('/api/ranch/:action', withAccount((accountId: string, req: Request) => ctx.provider.operateRanch(accountId, String(req.params.action), req.body)));
+
     app.get('/api/solar-calendar', withAccount((accountId: string) => ctx.provider.getSolarCalendar(accountId)));
     app.post('/api/solar-calendar/:action', withAccount((accountId: string, req: Request) => ctx.provider.operateSolarCalendar(accountId, req.params.action, req.body)));
     app.post('/api/illustrated/claim', withAccount((accountId: string, req: Request) => ctx.provider.claimIllustratedRewards(accountId, req.body?.type)));
@@ -66,6 +71,11 @@ function mountCommerceRoutes(app: Application, ctx: AdminContext): void {
     )));
     app.post('/api/activities/autumn/:key/:action', withAccount((accountId: string, req: Request) => (
         ctx.provider.operateAutumnActivity(accountId, req.params.key, req.params.action, req.body)
+    )));
+
+    app.get('/api/props-shop', withAccount((accountId: string) => ctx.provider.getPropsShop(accountId)));
+    app.post('/api/props-shop/purchase', withAccount((accountId: string, req: Request) => (
+        ctx.provider.purchaseProps(accountId, req.body?.goodsId, req.body?.count, req.body?.expectedOffer)
     )));
 
     app.get('/api/game-mall', withAccount((accountId: string, req: Request) => (

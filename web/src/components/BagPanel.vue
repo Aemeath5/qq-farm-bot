@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useIntervalFn } from '@vueuse/core'
 import { NButton } from 'naive-ui/es/button'
+import { NDropdown } from 'naive-ui/es/dropdown'
 import { NInputNumber } from 'naive-ui/es/input-number'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, ref, watch } from 'vue'
@@ -51,9 +52,39 @@ const CATEGORY_SHORT_LABELS: Record<string, string> = {
   tool: '道具',
 }
 
+type ItemActionKey = 'use' | 'sell' | 'view'
+
+// 主操作排在第一位直接显示，其余收进“更多”菜单，底栏宽度不随操作数量变化。
+function itemActions(item: any) {
+  const actions: Array<{ key: ItemActionKey, label: string, title: string }> = []
+  if (canUse(item))
+    actions.push({ key: 'use', label: '使用', title: '选择使用数量' })
+  if (canSell(item))
+    actions.push({ key: 'sell', label: '出售', title: '出售全部' })
+  if (canView(item))
+    actions.push({ key: 'view', label: '赠送', title: '查看赠送信息' })
+  return actions
+}
+
+function runItemAction(key: ItemActionKey, item: any) {
+  if (key === 'use')
+    handleUseClick(item)
+  else if (key === 'sell')
+    handleSellClick(item)
+  else
+    handleViewClick(item)
+}
+
 function formatItemCount(value: unknown) {
   const count = Number(value)
   return Number.isFinite(count) ? count.toLocaleString('zh-CN') : '0'
+}
+
+function useSuccessMessage(item: any, count: number, result: any) {
+  const rewards = result?.rewards || []
+  return [11, 33].includes(Number(item.itemType)) && rewards.length
+    ? `获得：${rewards.map((reward: any) => `${reward.name} ×${formatItemCount(reward.count)}`).join('、')}`
+    : `已使用 ${item.name || `物品${item.id}`} x${count}`
 }
 
 function getItemCategory(item: any): CategoryValue {
@@ -203,7 +234,7 @@ function canBatchSell(item: any) {
 
 function canUse(item: any) {
   const itemType = Number(item?.itemType || 0)
-  return (itemType === 11 || isDogFood(item) || isFertilizer(item)) && item?.locked !== true
+  return ([11, 33].includes(itemType) || isDogFood(item) || isFertilizer(item)) && item?.locked !== true
 }
 
 function isLockable(item: any) {
@@ -450,7 +481,7 @@ async function handleConfirm() {
       else {
         const res = await bagStore.useItem(currentAccountId.value, Number(item.id), count, Number(item.uid) || 0)
         if (res.ok) {
-          toastStore.success(`已使用 ${item.name || `物品${item.id}`} x${count}`)
+          toastStore.success(useSuccessMessage(item, count, res.data))
           await loadBag()
         }
         else {
@@ -661,13 +692,13 @@ useIntervalFn(loadBag, 60000)
 
     <EmptyState v-else-if="!status?.connection?.connected" title="账号未运行" description="启动账号后读取背包物品" icon="i-carbon-connection-signal-off" />
 
-    <div v-else class="personal-panel__card farm-card rounded-2xl p-4 sm:p-5">
+    <div v-else class="personal-panel__card bag-panel-card farm-card rounded-2xl">
       <div v-if="items.length === 0" class="farm-card rounded-xl p-8 text-center text-gray-500">
         无可展示物品
       </div>
 
       <template v-else>
-        <div class="bag-toolbar panel-sticky panel-sticky--inset shrink-0">
+        <div class="bag-toolbar panel-sticky shrink-0">
           <div class="bag-categories custom-scrollbar" role="group" aria-label="背包分类">
             <NButton
               v-for="cat in CATEGORY_OPTIONS"
@@ -686,7 +717,7 @@ useIntervalFn(loadBag, 60000)
               <span class="ml-1 text-xs opacity-70">({{ categoryCounts[cat.value] || 0 }})</span>
             </NButton>
           </div>
-          <div class="bag-actions flex flex-wrap items-center gap-2">
+          <div v-if="sellModeAvailable || lockModeAvailable" class="bag-actions flex flex-wrap items-center gap-2">
             <NButton
               v-if="sellModeAvailable"
               :type="batchAction === 'sell' ? 'warning' : 'default'"
@@ -784,9 +815,6 @@ useIntervalFn(loadBag, 60000)
                 >
                 <span v-else class="bag-item__fallback">{{ (item.name || '物').slice(0, 1) }}</span>
                 <span v-if="item.locked" class="bag-item__lock" title="已锁定"><span class="i-carbon-locked" /></span>
-                <span class="bag-item__qty" :class="{ 'is-hours': !!item.hoursText }" :title="item.hoursText ? `剩余 ${item.hoursText}` : `数量 ${formatItemCount(item.count)}`">
-                  {{ item.hoursText || `×${formatItemCount(item.count)}` }}
-                </span>
               </div>
 
               <strong class="bag-item__name" :title="item.name">{{ item.name || `物品${item.id}` }}</strong>
@@ -794,6 +822,7 @@ useIntervalFn(loadBag, 60000)
               <div class="bag-item__meta">
                 <span class="bag-type" :class="`bag-type--${getItemCategory(item)}`">{{ CATEGORY_SHORT_LABELS[getItemCategory(item)] }}</span>
                 <span v-if="item.level > 0">Lv{{ item.level }}</span>
+                <span v-if="item.price > 0" :class="getPriceClass(item)" title="单价">{{ item.price }}{{ item.priceUnit || '金' }}</span>
                 <span
                   v-if="item.sellStatus || item.locked"
                   :class="{ 'is-sellable': canSell(item), 'is-locked': item.locked }"
@@ -803,26 +832,43 @@ useIntervalFn(loadBag, 60000)
               <div v-if="mutantTypeLabel(item)" class="bag-item__line" :title="`变异类型：${mutantTypeLabel(item)}`">
                 变异 · {{ mutantTypeLabel(item) }}
               </div>
-              <div v-if="item.price > 0" class="bag-item__line" :class="getPriceClass(item)">
-                单价 {{ item.price }}{{ item.priceUnit || '金' }}
-              </div>
               <div class="bag-item__ids">
                 #{{ item.id }}<template v-if="item.uid">
                   · UID {{ item.uid }}
                 </template>
               </div>
 
-              <div v-if="!batchMode && (canUse(item) || canSell(item) || canView(item))" class="bag-item__actions" @click.stop>
-                <NButton v-if="canUse(item)" size="tiny" type="primary" secondary title="选择使用数量" @click="handleUseClick(item)">
-                  使用
-                </NButton>
-                <NButton v-if="canSell(item)" size="tiny" secondary title="出售全部" @click="handleSellClick(item)">
-                  出售
-                </NButton>
-                <NButton v-if="canView(item)" size="tiny" secondary title="查看赠送信息" @click="handleViewClick(item)">
-                  赠送
-                </NButton>
-              </div>
+              <!-- 每张卡都有底栏：左侧数量，右侧操作。卡片结构一致，因此等高；数量不再压在图标上。 -->
+              <footer class="bag-item__foot">
+                <span class="bag-item__qty" :class="{ 'is-hours': !!item.hoursText }" :title="item.hoursText ? `剩余 ${item.hoursText}` : `数量 ${formatItemCount(item.count)}`">
+                  <template v-if="item.hoursText">{{ item.hoursText }}</template>
+                  <template v-else><small>×</small>{{ formatItemCount(item.count) }}</template>
+                </span>
+                <span v-if="!batchMode && itemActions(item).length" class="bag-item__ops" @click.stop>
+                  <NButton
+                    size="tiny"
+                    :type="itemActions(item)[0]!.key === 'use' ? 'primary' : 'default'"
+                    secondary
+                    :title="itemActions(item)[0]!.title"
+                    @click="runItemAction(itemActions(item)[0]!.key, item)"
+                  >
+                    {{ itemActions(item)[0]!.label }}
+                  </NButton>
+                  <NDropdown
+                    v-if="itemActions(item).length > 1"
+                    trigger="click"
+                    placement="bottom-end"
+                    :options="itemActions(item).slice(1).map(action => ({ key: action.key, label: action.label }))"
+                    @select="(key: ItemActionKey) => runItemAction(key, item)"
+                  >
+                    <NButton size="tiny" quaternary circle title="更多操作" aria-label="更多操作">
+                      <template #icon>
+                        <span class="i-carbon-overflow-menu-horizontal" />
+                      </template>
+                    </NButton>
+                  </NDropdown>
+                </span>
+              </footer>
             </article>
           </div>
         </div>
@@ -899,6 +945,7 @@ useIntervalFn(loadBag, 60000)
 .bag-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  grid-auto-rows: 1fr;
   gap: 14px;
 }
 
@@ -928,7 +975,7 @@ useIntervalFn(loadBag, 60000)
   width: 72px;
   height: 72px;
   display: grid;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   place-items: center;
   border-radius: 18px;
   background: var(--ui-surface-soft);
@@ -943,33 +990,50 @@ useIntervalFn(loadBag, 60000)
 .bag-item__fallback {
   color: var(--ui-subtle);
   font-size: 24px;
-  font-weight: 700;
+  font-weight: var(--fw-700);
+}
+
+.bag-item__foot {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px dashed var(--ui-border);
 }
 
 .bag-item__qty {
-  position: absolute;
-  right: -12px;
-  bottom: -8px;
-  min-width: 30px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  color: #fff;
-  background: #33433a;
-  box-shadow: 0 0 0 2px var(--ui-surface-strong);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 18px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-ink);
+  font-size: 16px;
+  font-weight: var(--fw-700);
+  line-height: 1.2;
+  text-overflow: ellipsis;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
-.bag-item__qty.is-hours {
-  background: var(--ui-blue);
+.bag-item__qty small {
+  margin-right: 1px;
+  color: var(--ui-muted);
+  font-size: 12px;
+  font-weight: var(--fw-600);
 }
 
-:global(.dark) .bag-item__qty {
-  color: #142019;
-  background: #d9e6dc;
+.bag-item__qty.is-hours {
+  color: var(--ui-blue);
+  font-size: 14px;
+}
+
+.bag-item__ops {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
 }
 
 .bag-item__lock {
@@ -982,7 +1046,7 @@ useIntervalFn(loadBag, 60000)
   place-items: center;
   border-radius: 999px;
   color: #fff;
-  background: var(--ui-warning);
+  background: var(--ui-warning-fill);
   box-shadow: 0 0 0 2px var(--ui-surface-strong);
   font-size: 12px;
 }
@@ -992,7 +1056,7 @@ useIntervalFn(loadBag, 60000)
   overflow: hidden;
   color: var(--ui-ink);
   font-size: 14px;
-  font-weight: 650;
+  font-weight: var(--fw-650);
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1015,13 +1079,13 @@ useIntervalFn(loadBag, 60000)
 
 .bag-item__meta .is-locked {
   color: var(--ui-warning);
-  font-weight: 600;
+  font-weight: var(--fw-600);
 }
 
 .bag-type {
   padding: 0 6px;
   border-radius: 5px;
-  font-weight: 600;
+  font-weight: var(--fw-600);
 }
 
 .bag-type--fruit {
@@ -1059,19 +1123,6 @@ useIntervalFn(loadBag, 60000)
   font-variant-numeric: tabular-nums;
 }
 
-.bag-item__actions {
-  display: flex;
-  width: 100%;
-  gap: 6px;
-  margin-top: auto;
-  padding-top: 10px;
-}
-
-.bag-item__actions :deep(.n-button) {
-  flex: 1 1 0;
-  min-width: 0;
-}
-
 /* 触屏上分类条横向滑动即可，隐藏滚动条。 */
 @media (hover: none) {
   .bag-categories {
@@ -1089,8 +1140,19 @@ useIntervalFn(loadBag, 60000)
     gap: 10px;
   }
 
-  .bag-item__actions :deep(.n-button) {
-    height: 30px;
+  .bag-item__qty {
+    font-size: 15px;
+  }
+}
+
+.bag-panel-card {
+  --bag-panel-pad: 16px;
+  padding: var(--bag-panel-pad);
+}
+
+@media (min-width: 640px) {
+  .bag-panel-card {
+    --bag-panel-pad: 20px;
   }
 }
 
@@ -1098,7 +1160,11 @@ useIntervalFn(loadBag, 60000)
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-bottom: 14px;
+  margin: calc(-1 * var(--bag-panel-pad)) calc(-1 * var(--bag-panel-pad)) 14px;
+  padding: 12px var(--bag-panel-pad);
+  border-radius: var(--ui-radius-card) var(--ui-radius-card) 0 0;
+  background: var(--ui-table-head);
+  box-shadow: 0 1px 0 var(--ui-border);
 }
 
 .bag-batch-hint {
@@ -1150,7 +1216,7 @@ useIntervalFn(loadBag, 60000)
 
 .bag-check.is-checked {
   border-color: var(--ui-primary);
-  background: var(--ui-primary);
+  background: var(--ui-primary-fill);
 }
 
 .bag-ineligible {
@@ -1167,7 +1233,6 @@ useIntervalFn(loadBag, 60000)
   min-width: 0;
   display: flex;
   gap: 8px;
-  padding-bottom: 4px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
 }
@@ -1189,7 +1254,7 @@ useIntervalFn(loadBag, 60000)
 .thumb-wrap.fallback::after {
   content: attr(data-fallback);
   font-size: 1.5rem;
-  font-weight: bold;
+  font-weight: var(--fw-700);
   color: #9ca3af;
   text-transform: uppercase;
 }
@@ -1224,7 +1289,7 @@ useIntervalFn(loadBag, 60000)
   display: block;
   margin-bottom: 8px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--fw-700);
 }
 
 .use-stepper {
@@ -1253,7 +1318,7 @@ useIntervalFn(loadBag, 60000)
 .sachet-detail__message span {
   color: var(--n-text-color-3);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--fw-700);
 }
 
 .sachet-detail__row strong {

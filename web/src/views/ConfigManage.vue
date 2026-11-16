@@ -8,6 +8,7 @@ import api, { getApiErrorMessage } from '@/api'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import OverflowTooltip from '@/components/ui/OverflowTooltip.vue'
+import { vLazySrc } from '@/directives/lazy-src'
 import { useToastStore } from '@/stores/toast'
 
 const props = defineProps<{
@@ -371,10 +372,10 @@ function itemDescription(item: any): string {
   <div class="space-y-5">
     <div class="border farm-card border-gray-200 rounded-2xl bg-white shadow-md dark:border-gray-700 dark:bg-gray-800">
       <!-- 搜索 + 筛选 -->
-      <div class="flex flex-wrap items-center gap-2 border-b border-gray-100 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900/30">
+      <div class="catalog-toolbar flex flex-wrap items-center gap-2 border-b border-gray-100 p-4 dark:border-gray-700">
         <NInput
           v-model:value="searchKeyword"
-          class="w-52 shrink-0"
+          class="catalog-search"
           clearable
           :placeholder="activeTab === 'seeds' ? '搜索种子...' : activeTab === 'fruits' ? '搜索果实...' : '搜索道具...'"
         >
@@ -446,12 +447,12 @@ function itemDescription(item: any): string {
         <div v-if="filteredSeeds.length === 0" class="py-16 text-center text-gray-400">
           {{ searchKeyword ? '没有匹配的种子' : '暂无种子数据' }}
         </div>
-        <div v-else-if="isDesktop" class="overflow-hidden border farm-card border-gray-200 rounded-2xl shadow-sm dark:border-gray-700">
-          <div class="overflow-x-auto">
-            <table class="w-full whitespace-nowrap text-left text-sm">
+        <div v-else-if="isDesktop" class="catalog-table-frame">
+          <div class="catalog-table-scroll overflow-x-auto">
+            <table class="catalog-table w-full whitespace-nowrap text-left text-sm">
               <thead class="border-b bg-gray-50 text-xs text-gray-500 uppercase dark:border-gray-700 dark:bg-gray-700/50 dark:text-gray-400">
                 <tr>
-                  <th class="sticky left-0 z-10 bg-gray-50 px-4 py-3 font-medium shadow-[1px_0_0_0_rgba(0,0,0,0.05)] dark:bg-gray-800">
+                  <th class="sticky left-0 z-2 px-4 py-3 font-medium">
                     种子
                   </th>
                   <th class="px-4 py-3 font-medium">
@@ -475,21 +476,22 @@ function itemDescription(item: any): string {
                   <th class="px-4 py-3 font-medium">
                     价格
                   </th>
-                  <th class="sticky right-0 z-10 bg-gray-50 px-4 py-3 text-center font-medium shadow-[-1px_0_0_0_rgba(0,0,0,0.05)] dark:bg-gray-800">
+                  <th class="sticky right-0 z-10 bg-gray-50 px-4 py-3 text-center shadow-[-1px_0_0_0_rgba(0,0,0,0.05)] font-medium dark:bg-gray-800">
                     操作
                   </th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
                 <tr v-for="item in paginatedSeeds" :key="item.seedId" class="group transition-colors hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                  <td class="sticky left-0 bg-white px-4 py-2 shadow-[1px_0_0_0_rgba(0,0,0,0.05)] dark:bg-gray-800 dark:group-hover:bg-gray-700/50">
+                  <td class="sticky left-0 z-1 px-4 py-2">
                     <div class="flex items-center gap-3">
                       <div class="relative h-10 w-10 flex shrink-0 items-center justify-center overflow-hidden border border-gray-200 rounded-lg bg-gray-100 dark:border-gray-600 dark:bg-gray-700">
                         <img
                           v-if="item.image && !imageErrors[item.seedId]"
-                          :src="item.image"
+                          v-lazy-src="item.image"
                           class="h-8 w-8 object-contain"
                           loading="lazy"
+                          decoding="async"
                           @error="imageErrors[item.seedId] = true"
                         >
                         <div v-else class="i-carbon-sprout text-xl text-gray-400" />
@@ -552,9 +554,10 @@ function itemDescription(item: any): string {
               <div class="relative h-12 w-12 flex shrink-0 items-center justify-center overflow-hidden border border-gray-200 rounded-lg bg-gray-100 dark:border-gray-600 dark:bg-gray-700">
                 <img
                   v-if="item.image && !imageErrors[item.seedId]"
-                  :src="item.image"
+                  v-lazy-src="item.image"
                   class="h-10 w-10 object-contain"
                   loading="lazy"
+                  decoding="async"
                   @error="imageErrors[item.seedId] = true"
                 >
                 <div v-else class="i-carbon-sprout text-xl text-gray-400" />
@@ -599,12 +602,12 @@ function itemDescription(item: any): string {
         <div v-if="filteredFruits.length === 0" class="py-16 text-center text-gray-400">
           {{ searchKeyword ? '没有匹配的果实' : '暂无果实数据' }}
         </div>
-        <div v-else-if="isDesktop" class="overflow-hidden border farm-card border-gray-200 rounded-2xl shadow-sm dark:border-gray-700">
-          <div class="overflow-x-auto">
-            <table class="w-full whitespace-nowrap text-left text-sm">
+        <div v-else-if="isDesktop" class="catalog-table-frame">
+          <div class="catalog-table-scroll overflow-x-auto">
+            <table class="catalog-table w-full whitespace-nowrap text-left text-sm">
               <thead class="border-b bg-gray-50 text-xs text-gray-500 uppercase dark:border-gray-700 dark:bg-gray-700/50 dark:text-gray-400">
                 <tr>
-                  <th class="sticky left-0 z-10 bg-gray-50 px-4 py-3 font-medium shadow-[1px_0_0_0_rgba(0,0,0,0.05)] dark:bg-gray-800">
+                  <th class="sticky left-0 z-2 px-4 py-3 font-medium">
                     果实
                   </th>
                   <th class="px-4 py-3 font-medium">
@@ -629,14 +632,15 @@ function itemDescription(item: any): string {
               </thead>
               <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
                 <tr v-for="item in paginatedFruits" :key="item.id" class="group transition-colors hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                  <td class="sticky left-0 bg-white px-4 py-2 shadow-[1px_0_0_0_rgba(0,0,0,0.05)] dark:bg-gray-800 dark:group-hover:bg-gray-700/50">
+                  <td class="sticky left-0 z-1 px-4 py-2">
                     <div class="flex items-center gap-3">
                       <div class="relative h-10 w-10 flex shrink-0 items-center justify-center overflow-hidden border border-gray-200 rounded-lg bg-gray-100 dark:border-gray-600 dark:bg-gray-700">
                         <img
                           v-if="item.image && !imageErrors[item.id]"
-                          :src="item.image"
+                          v-lazy-src="item.image"
                           class="h-8 w-8 object-contain"
                           loading="lazy"
+                          decoding="async"
                           @error="imageErrors[item.id] = true"
                         >
                         <div v-else class="i-carbon-crop-growth text-xl text-gray-400" />
@@ -678,9 +682,10 @@ function itemDescription(item: any): string {
               <div class="relative h-12 w-12 flex shrink-0 items-center justify-center overflow-hidden border border-gray-200 rounded-lg bg-gray-100 dark:border-gray-600 dark:bg-gray-700">
                 <img
                   v-if="item.image && !imageErrors[item.id]"
-                  :src="item.image"
+                  v-lazy-src="item.image"
                   class="h-10 w-10 object-contain"
                   loading="lazy"
+                  decoding="async"
                   @error="imageErrors[item.id] = true"
                 >
                 <div v-else class="i-carbon-crop-growth text-xl text-gray-400" />
@@ -711,12 +716,12 @@ function itemDescription(item: any): string {
         <div v-if="filteredItems.length === 0" class="py-16 text-center text-gray-400">
           {{ searchKeyword || itemTypeFilter ? '没有匹配的道具' : '暂无道具数据' }}
         </div>
-        <div v-else-if="isDesktop" class="overflow-hidden border farm-card border-gray-200 rounded-2xl shadow-sm dark:border-gray-700">
-          <div class="overflow-x-auto">
-            <table class="w-full whitespace-nowrap text-left text-sm">
+        <div v-else-if="isDesktop" class="catalog-table-frame">
+          <div class="catalog-table-scroll overflow-x-auto">
+            <table class="catalog-table w-full whitespace-nowrap text-left text-sm">
               <thead class="border-b bg-gray-50 text-xs text-gray-500 uppercase dark:border-gray-700 dark:bg-gray-700/50 dark:text-gray-400">
                 <tr>
-                  <th class="sticky left-0 z-10 bg-gray-50 px-4 py-3 font-medium shadow-[1px_0_0_0_rgba(0,0,0,0.05)] dark:bg-gray-800">
+                  <th class="sticky left-0 z-2 px-4 py-3 font-medium">
                     道具
                   </th>
                   <th class="px-4 py-3 font-medium">
@@ -744,14 +749,15 @@ function itemDescription(item: any): string {
               </thead>
               <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
                 <tr v-for="item in paginatedItems" :key="item.id" class="group transition-colors hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                  <td class="sticky left-0 bg-white px-4 py-2 shadow-[1px_0_0_0_rgba(0,0,0,0.05)] dark:bg-gray-800 dark:group-hover:bg-gray-700/50">
+                  <td class="sticky left-0 z-1 px-4 py-2">
                     <div class="flex items-center gap-3">
                       <div class="relative h-10 w-10 flex shrink-0 items-center justify-center overflow-hidden border border-gray-200 rounded-lg bg-gray-100 dark:border-gray-600 dark:bg-gray-700">
                         <img
                           v-if="item.image && !imageErrors[item.id]"
-                          :src="item.image"
+                          v-lazy-src="item.image"
                           class="h-8 w-8 object-contain"
                           loading="lazy"
+                          decoding="async"
                           @error="imageErrors[item.id] = true"
                         >
                         <div v-else class="i-carbon-box text-xl text-gray-400" />
@@ -804,9 +810,10 @@ function itemDescription(item: any): string {
               <div class="relative h-12 w-12 flex shrink-0 items-center justify-center overflow-hidden border border-gray-200 rounded-lg bg-gray-100 dark:border-gray-600 dark:bg-gray-700">
                 <img
                   v-if="item.image && !imageErrors[item.id]"
-                  :src="item.image"
+                  v-lazy-src="item.image"
                   class="h-10 w-10 object-contain"
                   loading="lazy"
+                  decoding="async"
                   @error="imageErrors[item.id] = true"
                 >
                 <div v-else class="i-carbon-box text-xl text-gray-400" />
@@ -849,3 +856,60 @@ function itemDescription(item: any): string {
     />
   </div>
 </template>
+
+<style scoped>
+.catalog-toolbar {
+  background: var(--ui-bg-soft);
+}
+
+.catalog-search {
+  width: 240px;
+  flex: 0 1 240px;
+}
+
+.catalog-table-frame {
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 10px;
+  isolation: isolate;
+}
+
+.catalog-table-scroll {
+  overscroll-behavior-x: contain;
+}
+
+.catalog-table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.catalog-table th {
+  height: 42px;
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--ui-muted);
+  background: var(--ui-table-head);
+}
+
+.catalog-table td {
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.catalog-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.catalog-table td:first-child {
+  background: var(--ui-surface-solid);
+}
+
+.catalog-table tbody tr:hover td:first-child {
+  background: var(--ui-bg-soft);
+}
+
+@media (max-width: 639px) {
+  .catalog-search {
+    width: 100%;
+    flex-basis: 100%;
+  }
+}
+</style>

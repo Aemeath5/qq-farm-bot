@@ -1,3 +1,4 @@
+import type { RanchAutomationConfig } from '../config/ranch-automation';
 export {};
 export type PlantingStrategy =
   | 'preferred'
@@ -12,10 +13,11 @@ export type BagSeedFallbackStrategy = Exclude<PlantingStrategy, 'bag_priority'>;
 
 export type FertilizerMode = 'both' | 'normal' | 'organic' | 'smart' | 'none';
 
-export type FertilizerLandType = 'purple-gold' | 'gold' | 'black' | 'red' | 'normal';
+export type FertilizerLandType = 'blue-crystal' | 'purple-gold' | 'gold' | 'black' | 'red' | 'normal';
 
-export interface AutomationConfig {
+export interface AutomationConfig extends RanchAutomationConfig {
   farm: boolean;
+  farm_harvest_tiangong: boolean;
   farm_push: boolean;
   land_upgrade: boolean;
   friend: boolean;
@@ -84,6 +86,8 @@ export interface AccountConfig {
   fertilizerBuyNormalCount: number;
   fertilizerBuyNormalThresholdHours: number;
   fertilizerBuyCheckIntervalMinutes: number;
+  /** 每天检查邮箱奖励的时间（0-23 点，默认 10 点）；到点后每天只触发一次。 */
+  emailClaimHour: number;
   bagSeedPriority: number[];
   /** 是否为明确排在前面的多格背包种子保留尚未连成布局的空地。 */
   bagSeedMultiLandReservationEnabled: boolean;
@@ -132,6 +136,8 @@ export interface SystemConfig {
   serverUrl: string;
   clientVersion: string;
   clientVersionUpdatedAt?: number;
+  wxClientVersion: string;
+  wxClientVersionUpdatedAt?: number;
   platform: string;
   os: string;
   timeZone: string;

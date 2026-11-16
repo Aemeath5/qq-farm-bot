@@ -2,6 +2,8 @@ import type { AccountConfig, AutomationConfig, BagSeedFallbackStrategy, Fertiliz
 export {};
 
 const sharedState = require('./shared-state');
+const { assertEmailClaimHour } = require('../../utils/hour-of-day');
+const { normalizeRanchSetting } = require('../../config/ranch-automation');
 const { readKnownFriendGidsCache, writeKnownFriendGidsCache } = require('./gid-cache');
 
 const {
@@ -12,6 +14,7 @@ const {
     normalizeKnownFriendGids,
     normalizeKnownFriendGidSyncCooldownSec,
     normalizeFriendsListCacheTtlSec,
+    normalizeEmailClaimHour,
     normalizeBagSeedPriority,
     normalizeBagSeedLandTypes,
     normalizeBagSeedFallbackStrategy,
@@ -38,35 +41,45 @@ function getAccountConfigSnapshot(accountId?: unknown): AccountConfig {
 }
 
 function setAccountConfigSnapshot(accountId: unknown, nextConfig: Partial<AccountConfig>, persist: boolean = true): AccountConfig {
+    if (Object.hasOwn(nextConfig, 'emailClaimHour')) assertEmailClaimHour(nextConfig.emailClaimHour);
+    // Initialization must happen before changing memory; a first direct call can
+    // otherwise reload old data over the configuration it is about to save.
+    const persistence = persist ? require('./global-config') : null;
     const id = sharedState.resolveAccountId(accountId);
+    const next = normalizeAccountConfig(nextConfig, sharedState.accountFallbackConfig);
     if (!id) {
-        sharedState.accountFallbackConfig = normalizeAccountConfig(nextConfig, sharedState.accountFallbackConfig);
-        globalConfig.defaultAccountConfig = cloneAccountConfig(sharedState.accountFallbackConfig);
-        if (persist) { require('./global-config').saveGlobalConfig(); }
+        if (persist) persistence.saveGlobalConfig({ defaultAccountConfig: next });
+        else {
+            sharedState.accountFallbackConfig = next;
+            globalConfig.defaultAccountConfig = cloneAccountConfig(next);
+        }
         return cloneAccountConfig(sharedState.accountFallbackConfig);
     }
-    globalConfig.accountConfigs[id] = normalizeAccountConfig(nextConfig, sharedState.accountFallbackConfig);
-    if (persist) { require('./global-config').saveGlobalConfig(); }
+    if (persist) sharedState.configStorage.saveAccount(id, next);
+    globalConfig.accountConfigs[id] = next;
     return cloneAccountConfig(globalConfig.accountConfigs[id]);
 }
 
 function removeAccountConfig(accountId: unknown): void {
+    require('./global-config');
     const id = sharedState.resolveAccountId(accountId);
     if (!id) return;
     if (globalConfig.accountConfigs[id]) {
+        sharedState.configStorage.removeAccount(id);
         delete globalConfig.accountConfigs[id];
-        require('./global-config').saveGlobalConfig();
     }
 }
 
 function ensureAccountConfig(accountId: unknown, options: { persist?: boolean } = {}): AccountConfig | null {
+    if (options.persist !== false) require('./global-config');
     const id = sharedState.resolveAccountId(accountId);
     if (!id) return null;
     if (globalConfig.accountConfigs[id]) {
         return cloneAccountConfig(globalConfig.accountConfigs[id]);
     }
-    globalConfig.accountConfigs[id] = cloneAccountConfig(sharedState.DEFAULT_ACCOUNT_CONFIG);
-    if (options.persist !== false) require('./global-config').saveGlobalConfig();
+    const next = cloneAccountConfig(sharedState.DEFAULT_ACCOUNT_CONFIG);
+    if (options.persist !== false) sharedState.configStorage.saveAccount(id, next);
+    globalConfig.accountConfigs[id] = next;
     return cloneAccountConfig(globalConfig.accountConfigs[id]);
 }
 
@@ -97,6 +110,7 @@ function getConfigSnapshot(accountId?: unknown): AccountConfig & { ui: typeof gl
         fertilizerBuyNormalCount: Math.max(0, Math.min(10000, Number(cfg.fertilizerBuyNormalCount) || 0)),
         fertilizerBuyNormalThresholdHours: Math.max(0, Math.min(990, Number(cfg.fertilizerBuyNormalThresholdHours) || 0)),
         fertilizerBuyCheckIntervalMinutes: Math.max(1, Math.min(1440, Number(cfg.fertilizerBuyCheckIntervalMinutes) || 30)),
+        emailClaimHour: normalizeEmailClaimHour(cfg.emailClaimHour, sharedState.DEFAULT_ACCOUNT_CONFIG.emailClaimHour),
         bagSeedPriority: [...(cfg.bagSeedPriority || [])],
         bagSeedMultiLandReservationEnabled: !!cfg.bagSeedMultiLandReservationEnabled,
         bagSeedLandTypes: cloneBagSeedLandTypes(cfg.bagSeedLandTypes),
@@ -117,8 +131,10 @@ interface ApplyConfigSnapshotOptions {
 
 function applyConfigSnapshot(snapshot: Record<string, any> | undefined, options: ApplyConfigSnapshotOptions = {}): ReturnType<typeof getConfigSnapshot> {
     const cfg: Record<string, any> = snapshot || {};
+    if (Object.hasOwn(cfg, 'emailClaimHour')) assertEmailClaimHour(cfg.emailClaimHour);
     const persist = options.persist !== false;
     const accountId = options.accountId;
+    if (persist) require('./global-config');
 
     const current = getAccountConfigSnapshot(accountId);
     const next = normalizeAccountConfig(current, sharedState.accountFallbackConfig);
@@ -131,6 +147,8 @@ function applyConfigSnapshot(snapshot: Record<string, any> | undefined, options:
                 (next.automation as any)[k] = allowed.includes(v as string) ? v : (next.automation as any)[k];
             } else if (k === 'fertilizer_land_types') {
                 (next.automation as any)[k] = normalizeFertilizerLandTypes(v, next.automation.fertilizer_land_types);
+            } else if (k.startsWith('ranch_')) {
+                (next.automation as any)[k] = normalizeRanchSetting(k, v);
             } else if (k === 'fertilizer_smart_seconds') {
                 (next.automation as any)[k] = Math.max(30, Math.min(3600, Number(v) || 300));
             } else {
@@ -173,9 +191,6 @@ function applyConfigSnapshot(snapshot: Record<string, any> | undefined, options:
 
     if (cfg.knownFriendGids !== undefined) {
         next.knownFriendGids = normalizeKnownFriendGids(cfg.knownFriendGids, next.knownFriendGids);
-        if (accountId) {
-            writeKnownFriendGidsCache(accountId, next.knownFriendGids);
-        }
     }
 
     if (cfg.knownFriendGidSyncCooldownSec !== undefined) {
@@ -228,6 +243,10 @@ function applyConfigSnapshot(snapshot: Record<string, any> | undefined, options:
         next.fertilizerBuyCheckIntervalMinutes = Math.max(1, Math.min(1440, Number(cfg.fertilizerBuyCheckIntervalMinutes) || 30));
     }
 
+    if (cfg.emailClaimHour !== undefined) {
+        next.emailClaimHour = normalizeEmailClaimHour(cfg.emailClaimHour, next.emailClaimHour);
+    }
+
     if (cfg.bagSeedPriority !== undefined && cfg.bagSeedPriority !== null) {
         next.bagSeedPriority = normalizeBagSeedPriority(cfg.bagSeedPriority);
     }
@@ -270,15 +289,13 @@ function applyConfigSnapshot(snapshot: Record<string, any> | undefined, options:
         );
     }
 
-    if (cfg.ui && typeof cfg.ui === 'object') {
-        const theme = String(cfg.ui.theme || '').toLowerCase();
-        if (theme === 'dark' || theme === 'light') {
-            globalConfig.ui.theme = theme;
-        }
+    setAccountConfigSnapshot(accountId, next, persist);
+    const theme = String(cfg.ui?.theme || '').toLowerCase();
+    if ((theme === 'dark' || theme === 'light') && globalConfig.ui.theme !== theme) {
+        if (persist) require('./global-config').setUITheme(theme);
+        else globalConfig.ui.theme = theme;
     }
-
-    setAccountConfigSnapshot(accountId, next, false);
-    if (persist) require('./global-config').saveGlobalConfig();
+    if (cfg.knownFriendGids !== undefined && accountId) writeKnownFriendGidsCache(accountId, next.knownFriendGids);
     return getConfigSnapshot(accountId);
 }
 
