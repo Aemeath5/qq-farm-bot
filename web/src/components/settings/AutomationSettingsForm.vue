@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { SettingsState } from '@/stores/setting'
+import { computed } from 'vue'
 import { NCheckbox, NCheckboxGroup } from 'naive-ui/es/checkbox'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
@@ -36,6 +37,13 @@ const emit = defineEmits<{
 }>()
 
 const settings = defineModel<AutomationSettingsFormModel>({ required: true })
+// Persist the existing minutes field for backward compatibility, but edit in whole seconds.
+const ranchCheckSeconds = computed({
+  get: () => Math.round(Number(settings.value.automation.ranch_check_minutes || 5) * 60),
+  set: (seconds: number) => {
+    settings.value.automation.ranch_check_minutes = Number(seconds) / 60
+  },
+})
 const ranchSwitches = [
   ['ranch_harvest', '自动收获'],
   ['ranch_produce', '自动生产'],
@@ -87,7 +95,7 @@ const ranchStrategies = [
               <BaseSwitch v-model="settings.automation[key]" :label="label" :disabled="key === 'ranch_grass_buy' && !settings.automation.ranch_grass" />
             </div>
             <div class="automation-setting-item">
-              <BaseInput v-model.number="settings.automation.ranch_check_minutes" class="w-full" label="巡查间隔（分钟）" type="number" min="1" max="60" step="1" />
+              <BaseInput v-model.number="ranchCheckSeconds" class="w-full" label="巡查间隔（秒）" type="number" min="1" max="3600" step="1" />
             </div>
           </div>
           <div v-if="panel === 'automation'" class="mt-4">
