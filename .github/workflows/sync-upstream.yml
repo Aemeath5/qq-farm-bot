@@ -1,5 +1,5 @@
 name: Sync upstream master
-# Manual refresh trigger: 2026-11-22
+# Manual refresh trigger: 2026-11-22 (conflict resolution retry)
 
 on:
   workflow_dispatch:
