@@ -37,3 +37,5 @@ jobs:
           echo "Merged source SHA: $(git rev-parse HEAD)"
           test -f web/src/views/Ranch.vue
           test -f web/src/views/RanchOverview.vue
+
+# Retry sync after preserving customized files
