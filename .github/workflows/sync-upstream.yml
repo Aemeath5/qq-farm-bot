@@ -32,7 +32,7 @@ jobs:
           git remote add upstream https://github.com/liyangpengs/qq-farm-bot.git
           git fetch upstream master
           git checkout master
-          git merge --no-edit upstream/master
+          git merge -X ours --no-edit upstream/master
           git push origin master
           echo "Merged source SHA: $(git rev-parse HEAD)"
           test -f web/src/views/Ranch.vue
