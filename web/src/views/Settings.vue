@@ -32,15 +32,6 @@ const fertilizerLandTypeOptions = [
 const router = useRouter()
 const route = useRoute()
 const inRanch = computed(() => route.meta.gameSpace === 'ranch')
-const ranchAnimalOptions = ref<Array<{ value: number, label: string, kind: string }>>([])
-onMounted(async () => {
-  try {
-    const response = await api.get('/api/ranch/automation-options')
-    if (response.data.ok)
-      ranchAnimalOptions.value = response.data.data
-  }
-  catch (error) { showAlert(getApiErrorMessage(error, '牧场动物选项读取失败'), 'danger') }
-})
 const accountStore = useAccountStore()
 const userStore = useUserStore()
 const settingStore = useSettingStore()
@@ -49,10 +40,13 @@ const statusStore = useStatusStore()
 type SettingsTab = 'account' | 'strategy' | 'automation' | 'system'
 const storedTab = localStorage.getItem('settings-active-tab')
 const settingsTabKeys: SettingsTab[] = ['account', 'strategy', 'automation', 'system']
+// 牧场的自动化与养殖策略已移到「牧场策略」页，设置页只保留账号与系统。
+const ranchTabKeys: SettingsTab[] = ['account', 'system']
 const queryTab = String(route.query.tab || '')
-const initialTab = settingsTabKeys.includes(queryTab as SettingsTab)
+const storedInitialTab = settingsTabKeys.includes(queryTab as SettingsTab)
   ? queryTab as SettingsTab
   : storedTab === 'user' ? 'system' : (storedTab as SettingsTab) || 'account'
+const initialTab = inRanch.value && !ranchTabKeys.includes(storedInitialTab) ? 'account' : storedInitialTab
 const activeTab = ref<SettingsTab>(initialTab)
 
 watch(activeTab, (newTab) => {
@@ -66,6 +60,8 @@ watch(activeTab, (newTab) => {
 
 watch(() => route.query.tab, (value) => {
   const nextTab = String(value || '')
+  if (inRanch.value && !ranchTabKeys.includes(nextTab as SettingsTab))
+    return
   if (settingsTabKeys.includes(nextTab as SettingsTab) && nextTab !== activeTab.value)
     activeTab.value = nextTab as SettingsTab
 })
@@ -76,6 +72,8 @@ const tabs = [
   { key: 'automation', label: '自动控制', icon: 'i-carbon-settings-adjust' },
   { key: 'system', label: '系统设置', icon: 'i-carbon-settings' },
 ] as const
+
+const visibleTabs = computed(() => inRanch.value ? tabs.filter(tab => ranchTabKeys.includes(tab.key)) : tabs)
 
 function setActiveTab(value: string) {
   if (tabs.some(tab => tab.key === value))
@@ -895,7 +893,7 @@ const localAutomationSettings = ref({
     mystery_shop_allow_diamond: false,
     mystery_shop_arrival_notify: false,
     mystery_shop_purchase_notify: false,
-    fertilizer: 'normal',
+    fertilizer: 'none',
     skip_own_weed_bug: false,
     fertilizer_multi_season: false,
     fertilizer_land_types: [...defaultFertilizerLandTypes],
@@ -916,11 +914,13 @@ const localAutomationSettings = ref({
 })
 
 const fertilizerOptions = [
+  { label: '不施肥', value: 'none' },
   { label: '普通 + 有机', value: 'both' },
-  { label: '普通 + 快成熟有机', value: 'smart' },
   { label: '仅普通化肥', value: 'normal' },
   { label: '仅有机化肥', value: 'organic' },
-  { label: '不施肥', value: 'none' },
+  { label: '仅普通化肥催熟', value: 'normal_ripen' },
+  { label: '仅有机化肥催熟', value: 'organic_ripen' },
+  { label: '智能施肥（普通 + 有机催熟）', value: 'smart' },
 ]
 
 function syncLocalAutomationSettings() {
@@ -1486,7 +1486,7 @@ async function handleResetSystemConfig() {
   <div class="settings-page page-stack">
     <div class="settings-content">
       <PageTabs :value="activeTab" @update:value="setActiveTab">
-        <NTab v-for="tab in tabs" :key="tab.key" :name="tab.key">
+        <NTab v-for="tab in visibleTabs" :key="tab.key" :name="tab.key">
           <span class="inline-flex items-center gap-2">
             <span :class="tab.icon" />
             {{ tab.label }}
@@ -1924,29 +1924,6 @@ async function handleResetSystemConfig() {
           </div>
         </div>
 
-        <div v-else-if="activeTab === 'strategy' && inRanch" class="space-y-4">
-          <h3 class="text-lg font-bold">
-            养殖策略
-          </h3>
-          <p v-if="settingsLoading">
-            加载中...
-          </p>
-          <p v-else-if="!currentAccountId || loadedAccountId !== currentAccountId">
-            请先选择并加载账号
-          </p>
-          <AutomationSettingsForm
-            v-else
-            v-model="localAutomationSettings"
-            in-ranch
-            panel="strategy"
-            :ranch-animal-options="ranchAnimalOptions"
-            :saving="automationSaving"
-            :fertilizer-land-type-options="fertilizerLandTypeOptions"
-            :fertilizer-options="fertilizerOptions"
-            @save="saveAutomationSettings"
-          />
-        </div>
-
         <!-- 自动控制 -->
         <div v-else-if="activeTab === 'automation'" class="space-y-4">
           <div class="flex items-center justify-between">
@@ -1973,7 +1950,6 @@ async function handleResetSystemConfig() {
             v-model="localAutomationSettings"
             :saving="automationSaving"
             :in-ranch="inRanch"
-            :ranch-animal-options="ranchAnimalOptions"
             :fertilizer-land-type-options="fertilizerLandTypeOptions"
             :fertilizer-options="fertilizerOptions"
             @save="saveAutomationSettings"
