@@ -39,3 +39,5 @@ jobs:
           test -f web/src/views/RanchOverview.vue
 
 # Retry sync after preserving customized files
+
+# Manual refresh: 2026-11-25
